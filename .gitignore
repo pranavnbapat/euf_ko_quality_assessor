@@ -1,0 +1,43 @@
+# Ignore Python virtual environment
+.venv/
+venv/
+
+# Ignore database and credentials
+*.sqlite3
+.env
+
+# Ignore compiled Python files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore logs and system files
+*.log
+*.swp
+*.swo
+*.bin
+
+# Ignore IDE/editor config files
+.vscode/
+.idea/
+
+assets/
+data/
+!static/data/
+!static/data/**
+synda/
+testing/
+
+/*.nc
+
+*.deb
+*.csv
+*.json
+*.xlsx
+*.xls
+*.txt
+
+celerybeat-schedule
+data/celery/
+data_model_v2/
