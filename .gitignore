@@ -33,7 +33,7 @@ testing/
 
 *.deb
 *.csv
-*.json*         # Ignore all JSON and JSON-like files
+*.json*
 *.xls*
 *.txt
 !requirements.txt
