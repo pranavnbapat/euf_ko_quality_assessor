@@ -33,11 +33,9 @@ testing/
 
 *.deb
 *.csv
-*.json
-*.xlsx
-*.xls
+*.json*         # Ignore all JSON and JSON-like files
+*.xls*
 *.txt
+!requirements.txt
 
-celerybeat-schedule
-data/celery/
 data_model_v2/
