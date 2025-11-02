@@ -1,4 +1,4 @@
-# config.py
+# which_model_to_choose/get_summaries/config.py
 
 from __future__ import annotations
 
