@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
-
+import sys
 import time
+
+from typing import Any, Dict, List
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config import (
-    models_available, MODEL_TO_HOST,
-    EXTREME_CTX_THRESHOLD_TOK, NEAR_LIMIT_CTX_THRESHOLD_TOK,
-    DEFAULT_NUM_PREDICT, LONG_NUM_PREDICT, COMBINE_NUM_PREDICT,
-)
-
+from config import (models_available, MODEL_TO_HOST, EXTREME_CTX_THRESHOLD_TOK, NEAR_LIMIT_CTX_THRESHOLD_TOK,
+                    DEFAULT_NUM_PREDICT, LONG_NUM_PREDICT, COMBINE_NUM_PREDICT, SUMMARY_MAX_ATTEMPTS)
 from io_helpers import append_model_result_dict_mode, append_model_result_list_mode
 from ollama_client import call_ollama, warm_up_models
 from prompts import DEFAULT_PROMPT, COMBINE_PROMPT
 from utils import fmt, approx_token_count, split_into_tokenish_chunks, normalise_model_key, extract_summary_json
+
 
 def _maybe_cap_ctx(model: str, opts: dict) -> dict:
     if model.startswith("qwen3:30b"):
@@ -26,30 +24,105 @@ def _maybe_cap_ctx(model: str, opts: dict) -> dict:
 
 def _run_single_model(model: str, content: str) -> str:
     tok = approx_token_count(content)
-    if tok > EXTREME_CTX_THRESHOLD_TOK:
-        chunks = split_into_tokenish_chunks(content, 16_000, 400)
-        partials: List[str] = []
-        for ch in chunks:
-            map_opts = _maybe_cap_ctx(model, {"num_ctx": 32768, "num_predict": DEFAULT_NUM_PREDICT, "temperature": 0.2})
-            raw_part = call_ollama(model, DEFAULT_PROMPT, ch, options_override=map_opts, base_url=MODEL_TO_HOST[model])
-            obj_part = extract_summary_json(raw_part)
-            partials.append(obj_part["summary"])
-        combined_input = "\n\n---- PARTIAL SUMMARY ----\n".join(partials)
-        combine_opts = _maybe_cap_ctx(model, {"num_ctx": 32768, "num_predict": COMBINE_NUM_PREDICT, "temperature": 0.2})
-        raw_combined = call_ollama(model, COMBINE_PROMPT, combined_input, options_override=combine_opts,
-                                   base_url=MODEL_TO_HOST[model])
-        obj_json = extract_summary_json(raw_combined)
-        return obj_json["summary"]
-    elif tok > NEAR_LIMIT_CTX_THRESHOLD_TOK:
-        near_opts = _maybe_cap_ctx(model, {"num_ctx": 131072, "num_predict": LONG_NUM_PREDICT, "temperature": 0.2})
-        raw = call_ollama(model, DEFAULT_PROMPT, content, options_override=near_opts, base_url=MODEL_TO_HOST[model])
-        obj_json = extract_summary_json(raw)
-        return obj_json["summary"]
-    else:
-        opts = _maybe_cap_ctx(model, {"num_predict": DEFAULT_NUM_PREDICT, "temperature": 0.2})
-        raw = call_ollama(model, DEFAULT_PROMPT, content, options_override=opts, base_url=MODEL_TO_HOST[model])
-        obj_json = extract_summary_json(raw)
-        return obj_json["summary"]
+    last_err: Exception | None = None
+
+    for attempt in range(1, SUMMARY_MAX_ATTEMPTS + 1):
+        try:
+            if tok > EXTREME_CTX_THRESHOLD_TOK:
+                chunks = split_into_tokenish_chunks(content, 16_000, 400)
+                partials: List[str] = []
+                for ch in chunks:
+                    map_opts = _maybe_cap_ctx(
+                        model,
+                        {"num_ctx": 32768, "num_predict": DEFAULT_NUM_PREDICT, "temperature": 0.2},
+                    )
+                    raw_part = call_ollama(
+                        model,
+                        DEFAULT_PROMPT,
+                        ch,
+                        options_override=map_opts,
+                        base_url=MODEL_TO_HOST[model],
+                    )
+                    obj_part = extract_summary_json(raw_part)
+                    part_summary = (obj_part.get("summary") or "").strip()
+                    if not part_summary:
+                        raise ValueError("Empty partial summary from model")
+                    partials.append(part_summary)
+
+                combined_input = "\n\n---- PARTIAL SUMMARY ----\n".join(partials)
+                combine_opts = _maybe_cap_ctx(
+                    model,
+                    {"num_ctx": 32768, "num_predict": COMBINE_NUM_PREDICT, "temperature": 0.2},
+                )
+                raw_combined = call_ollama(
+                    model,
+                    COMBINE_PROMPT,
+                    combined_input,
+                    options_override=combine_opts,
+                    base_url=MODEL_TO_HOST[model],
+                )
+                obj_json = extract_summary_json(raw_combined)
+                final_summary = (obj_json.get("summary") or "").strip()
+                if not final_summary:
+                    raise ValueError("Empty combined summary from model")
+                return final_summary
+
+            elif tok > NEAR_LIMIT_CTX_THRESHOLD_TOK:
+                near_opts = _maybe_cap_ctx(
+                    model,
+                    {"num_ctx": 131072, "num_predict": LONG_NUM_PREDICT, "temperature": 0.2},
+                )
+                raw = call_ollama(
+                    model,
+                    DEFAULT_PROMPT,
+                    content,
+                    options_override=near_opts,
+                    base_url=MODEL_TO_HOST[model],
+                )
+                obj_json = extract_summary_json(raw)
+                summary = (obj_json.get("summary") or "").strip()
+                if not summary:
+                    raise ValueError("Empty summary from model")
+                return summary
+
+            else:
+                opts = _maybe_cap_ctx(
+                    model,
+                    {"num_predict": DEFAULT_NUM_PREDICT, "temperature": 0.2},
+                )
+                raw = call_ollama(
+                    model,
+                    DEFAULT_PROMPT,
+                    content,
+                    options_override=opts,
+                    base_url=MODEL_TO_HOST[model],
+                )
+                obj_json = extract_summary_json(raw)
+                summary = (obj_json.get("summary") or "").strip()
+                if not summary:
+                    raise ValueError("Empty summary from model")
+                return summary
+
+        except Exception as e:
+            # Capture and optionally retry
+            last_err = e
+            if attempt < SUMMARY_MAX_ATTEMPTS:
+                print(
+                    f"[WARN] {_run_single_model.__name__}: model={model} attempt {attempt} failed "
+                    f"with {type(e).__name__}: {e}. Retrying...",
+                    file=sys.stderr,
+                )
+                continue
+            else:
+                # No more attempts left
+                break
+
+    # If we reach here, all attempts failed or produced empty summaries
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(
+        f"Model {model} returned no usable summary after {SUMMARY_MAX_ATTEMPTS} attempts"
+    )
 
 def process_one_dict_item(augmented_one: Dict[str, Any], out_path, content: str, parallel: bool = True) -> Dict[str, Any]:
     warmed: set[str] = set()

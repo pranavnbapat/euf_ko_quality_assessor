@@ -31,6 +31,9 @@ DEFAULT_NUM_PREDICT = 2048
 LONG_NUM_PREDICT = 4096
 COMBINE_NUM_PREDICT = 8192
 
+# How many times to re-call the model if parsing/summary fails or is empty
+SUMMARY_MAX_ATTEMPTS = 3
+
 # ---------- NETWORK / TIMEOUTS ----------
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECS = 5
