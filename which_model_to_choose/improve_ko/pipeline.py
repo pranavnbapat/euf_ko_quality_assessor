@@ -19,7 +19,7 @@ from utils import (fmt, approx_token_count, split_into_tokenish_chunks, normalis
 
 
 def _maybe_cap_ctx(model: str, opts: dict) -> dict:
-    if model.startswith("qwen3:30b"):
+    if model.startswith("qwen3:30b") or model.startswith("gpt-oss:20b"):
         opts["num_ctx"] = min(opts.get("num_ctx", 32768), 32768)
     return opts
 
@@ -49,11 +49,14 @@ def _run_cleaning(model: str, content: str) -> str:
                         options_override=opts,
                         base_url=MODEL_TO_HOST[model],
                     )
+
                     obj_part = extract_cleaned_json(raw_part)
                     part_clean = (obj_part.get("cleaned") or "").strip()
+
                     if not part_clean:
                         raise ValueError("Empty cleaned chunk from model")
                     cleaned_parts.append(part_clean)
+
                 return "\n\n".join(cleaned_parts)
 
             else:
@@ -70,6 +73,7 @@ def _run_cleaning(model: str, content: str) -> str:
                 )
                 obj = extract_cleaned_json(raw)
                 cleaned = (obj.get("cleaned") or "").strip()
+
                 if not cleaned:
                     raise ValueError("Empty cleaned output from model")
                 return cleaned
@@ -274,6 +278,18 @@ def process_one_dict_item(
     # --- CLEAN ONLY ---
     if mode == "clean":
         cleaned_field = "ko_content_flat_cleaned"
+
+        if isinstance(content, str) and "No content present" in content:
+            if not augmented_one.get(cleaned_field):
+                append_model_result_dict_mode(
+                    augmented_one,
+                    out_path,
+                    cleaned_field,
+                    "No content present",
+                )
+            print(f"[TIMER] Item total (clean): {fmt(time.perf_counter() - t_item)}")
+            return augmented_one
+
         if not augmented_one.get(cleaned_field):
             if model not in warmed:
                 warm_up_models([model], base_url=MODEL_TO_HOST[model])
@@ -286,8 +302,8 @@ def process_one_dict_item(
 
     # --- SUMMARY ONLY (requires cleaned) ---
     if mode == "summary":
-        cleaned_field = "ko_content_flat_cleaned"
-        summary_field = "ko_content_flat_cleaned_summarised"
+        cleaned_field = "ko_content_flat"
+        summary_field = "ko_content_flat_summarised"
 
         cleaned_text = augmented_one.get(cleaned_field)
         if not isinstance(cleaned_text, str) or not cleaned_text.strip():

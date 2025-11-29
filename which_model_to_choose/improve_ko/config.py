@@ -8,7 +8,8 @@ from pathlib import Path
 
 # ---------- MODELS ----------
 models_available = [
-    "qwen3:30b-a3b-instruct-2507-q8_0"
+    "qwen3:30b-a3b-instruct-2507-q8_0",
+    # "gpt-oss:20b"
 ]
 
 PRIMARY_MODEL = models_available[0]
@@ -49,12 +50,13 @@ INPUT_DIR = PROJECT_ROOT / "input"
 
 # ---------- OLLAMA HOSTS (2× GPU) ----------
 # Primary host (kept for compatibility)
-OLLAMA_HOST = os.environ.get("RUNPOD_OLLAMA_HOST", "https://qiocpluslhlw0e-11434.proxy.runpod.net").rstrip("/")
+OLLAMA_HOST = os.environ.get("RUNPOD_OLLAMA_HOST", "https://998adsgormnld2-11434.proxy.runpod.net").rstrip("/")
 
 OLLAMA_HOSTS = {
-    "gpu0": "https://qiocpluslhlw0e-11434.proxy.runpod.net",
+    "gpu0": "https://998adsgormnld2-11434.proxy.runpod.net",
 }
 
 MODEL_TO_HOST = {
     "qwen3:30b-a3b-instruct-2507-q8_0": OLLAMA_HOSTS["gpu0"],
+    # "gpt-oss:20b": OLLAMA_HOSTS["gpu0"],
 }

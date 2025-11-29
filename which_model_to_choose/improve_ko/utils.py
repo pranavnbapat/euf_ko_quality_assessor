@@ -69,20 +69,24 @@ def normalise_model_key(model_tag: str) -> str:
 _JSON_OBJECT_RE = re.compile(r'\{\s*"summary"\s*:\s*"(?:[^"\\]|\\.)*"\s*\}', re.DOTALL)
 
 
-def _salvage_summary_from_truncated(raw: str) -> Optional[Dict[str, Any]]:
+def _salvage_single_field_from_truncated(raw: str, field: str) -> Optional[Dict[str, Any]]:
     """
-    Last-ditch salvage for cases where model output starts with {"summary":" but is truncated.
-    We try to extract the longest plausible summary string and synthesize the JSON.
+    Last-ditch salvage for cases where model output starts with {"<field>":" but is truncated
+    or contains invalid JSON (e.g. unescaped quotes). We try to extract the longest plausible
+    string value and synthesise a minimal JSON object {field: "..."}.
     """
     if not raw:
         return None
     s = raw.strip()
-    anchor = '{"summary":"'
+
+    anchor = f'{{"{field}":"'
     i = s.find(anchor)
     if i == -1:
         return None
+
+    # position just after the opening quote of the string value
     j = i + len(anchor)
-    # Walk forward to find the last unescaped quote
+
     in_escape = False
     last_quote = -1
     while j < len(s):
@@ -91,19 +95,24 @@ def _salvage_summary_from_truncated(raw: str) -> Optional[Dict[str, Any]]:
             in_escape = False
         elif ch == "\\":
             in_escape = True
-        elif ch == '"':  # potential terminator for the summary string
+        elif ch == '"':
+            # treat as possible terminator for the string
             last_quote = j
         j += 1
+
     if last_quote == -1:
         return None
-    summary_str = s[i+len(anchor):last_quote]
+
+    value_raw = s[i + len(anchor): last_quote]
+
     try:
-        # unescape JSON string
-        summary = json.loads(f'"{summary_str}"')
+        # Let json handle unescaping if possible
+        value = json.loads(f'"{value_raw}"')
     except Exception:
-        # if decoding fails, fall back to raw slice
-        summary = summary_str
-    return {"summary": summary}
+        # Fall back to raw slice if unescaping fails
+        value = value_raw
+
+    return {field: value}
 
 
 def _extract_single_field_json(raw: str, field: str) -> Dict[str, Any]:
@@ -178,9 +187,9 @@ def _extract_single_field_json(raw: str, field: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # Truncated salvage as last resort
-    salvaged = _salvage_summary_from_truncated(s) if field == "summary" else None
-    if salvaged and isinstance(salvaged.get("summary"), str):
+    # Truncated / invalid JSON salvage as a last resort
+    salvaged = _salvage_single_field_from_truncated(s, field)
+    if salvaged and isinstance(salvaged.get(field), str):
         return salvaged
 
     try:
@@ -202,19 +211,66 @@ def extract_summary_json(raw: str) -> Dict[str, Any]:
 
 def extract_cleaned_json(raw: str) -> Dict[str, Any]:
     """
-    Prefer {"cleaned": "..."} but tolerate {"summary": "..."} as a fallback.
-    Some models insist on using 'summary' even when instructed otherwise.
+    Parse cleaned text from model output.
+
+    New default behaviour with CLEAN_PROMPT:
+      - Model is expected to return *plain cleaned text* (no JSON).
+      - We still support legacy JSON forms:
+          {"cleaned": "..."}  or  {"summary": "..."}.
+    Always returns: {"cleaned": "<cleaned_text>"}.
     """
+    s = (raw or "").strip()
+
+    # Strip code fences if some model still insists on them
+    if s.startswith("```"):
+        # Drop the first fence and keep the rest
+        s = s.split("```", 1)[-1].strip()
+    if "```" in s:
+        # Drop anything after a closing fence
+        s = s.split("```", 1)[0].strip()
+
+    # 1) Try direct JSON first (old behaviour / misaligned models)
     try:
-        # First, try the correct shape
-        return _extract_single_field_json(raw, "cleaned")
-    except ValueError:
-        # Fallback: accept {"summary": "..."} and remap to 'cleaned'
-        obj = _extract_single_field_json(raw, "summary")
-        cleaned = (obj.get("summary") or "").strip()
-        if not cleaned:
-            raise ValueError("Fallback summary-based cleaned text is empty")
-        return {"cleaned": cleaned}
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            # Preferred: {"cleaned": "..."}
+            if isinstance(obj.get("cleaned"), str):
+                return {"cleaned": obj["cleaned"].strip()}
+            # Legacy: {"summary": "..."} reused as "cleaned"
+            if isinstance(obj.get("summary"), str):
+                return {"cleaned": obj["summary"].strip()}
+    except Exception:
+        # Not JSON – this is expected with the new CLEAN_PROMPT
+        pass
+
+    # 2) Non-JSON: treat the full body as already-cleaned text
+    if s:
+        return {"cleaned": s}
+
+    # 3) Last-resort salvage for truncated JSON-like outputs
+    #    (keeps robustness from older code paths)
+    salvaged = (
+        _salvage_single_field_from_truncated(raw, "cleaned")
+        or _salvage_single_field_from_truncated(raw, "summary")
+    )
+    if salvaged:
+        val = (salvaged.get("cleaned") or salvaged.get("summary") or "").strip()
+        if val:
+            return {"cleaned": val}
+
+    # If we reach here, the model really gave us nothing usable
+    raise ValueError("Empty cleaned text from model output")
+
+    # try:
+    #     # First, try the correct shape
+    #     return _extract_single_field_json(raw, "cleaned")
+    # except ValueError:
+    #     # Fallback: accept {"summary": "..."} and remap to 'cleaned'
+    #     obj = _extract_single_field_json(raw, "summary")
+    #     cleaned = (obj.get("summary") or "").strip()
+    #     if not cleaned:
+    #         raise ValueError("Fallback summary-based cleaned text is empty")
+    #     return {"cleaned": cleaned}
 
 
 def extract_metadata_json(raw: str) -> Dict[str, Any]:

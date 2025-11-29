@@ -38,10 +38,10 @@ CORRECTIONS:
 - Light grammar/spelling correction is allowed ONLY when it does not change meaning or shorten text.
 
 STRICT OUTPUT FORMAT:
-Return ONLY a single JSON object with EXACTLY this structure:
-{"cleaned": "<cleaned_text>"}
-
-Do NOT return {"summary": ...}, do NOT add any extra keys, explanations, or comments.
+- Return ONLY the cleaned text as plain text.
+- Do NOT wrap it in JSON.
+- Do NOT add quotes, explanations, headings, or any extra commentary.
+- Do NOT add markers like "Cleaned text:" or code fences.
 """.strip()
 
 
