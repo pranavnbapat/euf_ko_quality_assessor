@@ -8,17 +8,20 @@ from pathlib import Path
 
 # ---------- MODELS ----------
 models_available = [
-    "qwen3:30b-a3b-instruct-2507-q8_0",
-    "qwen3:30b-a3b-thinking-2507-q8_0",
+    "qwen3:30b-a3b-instruct-2507-q8_0"
 ]
 
-MODEL_OVERRIDES = {
-    "gpt-oss:latest": {
-        "no_schema": True,
-        "use_chat": True,
-        "num_predict": 2048,
-    },
-}
+PRIMARY_MODEL = models_available[0]
+
+MODEL_OVERRIDES: dict[str, dict] = {}
+
+# MODEL_OVERRIDES = {
+#     "gpt-oss:latest": {
+#         "no_schema": True,
+#         "use_chat": True,
+#         "num_predict": 2048,
+#     },
+# }
 
 # ---------- SCALING / CHUNKING ----------
 EXTREME_CTX_THRESHOLD_TOK = 128_000
@@ -46,15 +49,12 @@ INPUT_DIR = PROJECT_ROOT / "input"
 
 # ---------- OLLAMA HOSTS (2× GPU) ----------
 # Primary host (kept for compatibility)
-OLLAMA_HOST = os.environ.get("RUNPOD_OLLAMA_HOST", "https://ko376ch5nx1hwj-11434.proxy.runpod.net").rstrip("/")
+OLLAMA_HOST = os.environ.get("RUNPOD_OLLAMA_HOST", "https://qiocpluslhlw0e-11434.proxy.runpod.net").rstrip("/")
 
 OLLAMA_HOSTS = {
-    "gpu0": "https://ko376ch5nx1hwj-11434.proxy.runpod.net",
-    "gpu1": "https://ko376ch5nx1hwj-11435.proxy.runpod.net",
+    "gpu0": "https://qiocpluslhlw0e-11434.proxy.runpod.net",
 }
 
 MODEL_TO_HOST = {
-    # "gpt-oss:20b": OLLAMA_HOSTS["gpu1"],
-    "qwen3:30b-a3b-thinking-2507-q8_0": OLLAMA_HOSTS["gpu0"],
-    "qwen3:30b-a3b-instruct-2507-q8_0": OLLAMA_HOSTS["gpu1"],
+    "qwen3:30b-a3b-instruct-2507-q8_0": OLLAMA_HOSTS["gpu0"],
 }

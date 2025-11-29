@@ -92,28 +92,6 @@ def bm25_prepare(docs_tokens: List[List[str]], k1=1.2, b=0.75):
     return idf, dl, avgdl, k1, b
 
 
-# Score a query against all docs using classic BM25 with (k1, b).
-# We compute per-doc term frequencies on the fly; fine for ~7k docs.
-def bm25_score(query: List[str], idf, dl, avgdl, k1, b, docs_tokens: List[List[str]]):
-    """Score a query against all docs using classic BM25 with (k1, b)."""
-    qtf = Counter(query)
-    scores = np.zeros(len(docs_tokens), dtype=float)
-    for i, toks in enumerate(docs_tokens):
-        if not toks:
-            continue
-        tf = Counter(toks)
-        # Standard BM25 denominator with length normalisation.
-        denom = k1 * (1 - b + b * (len(toks) / (avgdl or 1.0))) + 1e-12
-        s = 0.0
-        for term, _qf in qtf.items():
-            w_idf = idf.get(term)
-            if w_idf is None:
-                continue
-            f = tf.get(term, 0)
-            s += w_idf * ((f * (k1 + 1)) / (f + denom))
-        scores[i] = s
-    return scores
-
 # ------------------------
 # Analysis pipeline
 # ------------------------
@@ -148,10 +126,24 @@ def main():
     # Candidate fields to inspect. Textual fields may participate in ranking.
     # Structured fields are for diagnostics (and later, facets/filters).
     FIELDS = [
-        "title_gpt_oss_20b","subtitle","description_gpt_oss_20b","ko_content_flat", "ko_content_flat_qwen3_30b_a3b_2507_q8_0","keywords",
-        "topics","themes","languages","locations_flat","category","subcategories","license",
-        "project_type","date_of_completion","creators","project_acronym","project_display_name",
-        "ko_content_flat_gpt_oss_20b"
+        "title",
+        "subtitle",
+        "description",
+        "ko_content_flat",
+        "keywords",
+        "topics",
+        "themes",
+        "languages",
+        "locations_flat",
+        "category",
+        "subcategories",
+        "license",
+        "project_type",
+        "date_of_completion",
+        "creators",
+        "project_acronym",
+        "project_display_name",
+        "project_name",
     ]
 
     # Normalise field values to strings
@@ -174,8 +166,10 @@ def main():
     for ko in data:
         for f in FIELDS:
             per_field_text[f].append(norm(ko.get(f, "")))
-        titles.append(norm(ko.get("title_gpt_oss_20b", "")))
+
+        titles.append(norm(ko.get("title", "")))
         keywords.append(norm(ko.get("keywords", "")))
+
     log.info("Normalised fields for %d KOs in %.1fs", len(data), time.time() - t0)
 
     # Cache per-field tokens once; reuse in diagnostics and SR-MRR
@@ -292,10 +286,26 @@ def main():
     # Candidate generation:
     # - BASE_FIELDS are the superset of fields we'll consider at all.
     # - We first filter by COVERAGE_MIN (e.g. 0.10) to avoid sparse fields skewing results.
-    BASE_FIELDS = ["title_gpt_oss_20b", "subtitle", "description_gpt_oss_20b", "ko_content_flat", "keywords", "topics", "themes", "languages",
-                   "locations_flat", "category", "subcategories", "license", "project_type", "date_of_completion",
-                   "creators","project_acronym", "project_display_name", "ko_content_flat_gpt_oss_20b",
-                   "ko_content_flat_qwen3_30b_a3b_2507_q8_0"]
+    BASE_FIELDS = [
+        "title",
+        "subtitle",
+        "description",
+        "ko_content_flat",
+        "keywords",
+        "topics",
+        "themes",
+        "languages",
+        "locations_flat",
+        "category",
+        "subcategories",
+        "license",
+        "project_type",
+        "date_of_completion",
+        "creators",
+        "project_acronym",
+        "project_display_name",
+        "project_name",
+    ]
 
     COVERAGE_MIN = 0.10
     eligible = [f for f in BASE_FIELDS if report.get(f, {}).get("coverage", 0.0) >= COVERAGE_MIN]
@@ -303,38 +313,35 @@ def main():
     candidates: List[List[str]] = [[f] for f in eligible]  # singles
 
     # CORE: fields used to form most combinations.
-    CORE = [f for f in ["title_gpt_oss_20b", "description_gpt_oss_20b", "ko_content_flat", "ko_content_flat_gpt_oss_20b",
-                        "ko_content_flat_qwen3_30b_a3b_2507_q8_0", "keywords"] if f in eligible]
+    CORE = [f for f in ["title", "description", "ko_content_flat", "keywords"] if f in eligible]
+
     FAST = os.getenv("FAST_CANDIDATES", "0") == "1"
     # FAST mode:
     # Add only a few high-value combos (keeps runtime low for large corpora).
     # Full mode (else) explores 2-, 3-, and 4-field combinations from CORE.
 
     if FAST:
-        if "title_gpt_oss_20b" in CORE and "description_gpt_oss_20b" in CORE:
-            if "ko_content_flat" in CORE:
-                candidates.append(["title_gpt_oss_20b", "description_gpt_oss_20b", "ko_content_flat"])
-            if ("ko_content_flat_gpt_oss_20b" in CORE) or ("ko_content_flat_qwen3_30b_a3b_2507_q8_0" in CORE):
-                if "ko_content_flat_gpt_oss_20b" in CORE:
-                    candidates.append(["title_gpt_oss_20b", "description_gpt_oss_20b", "ko_content_flat_gpt_oss_20b"])
-                if "ko_content_flat_qwen3_30b_a3b_2507_q8_0" in CORE:
-                    candidates.append(["title_gpt_oss_20b", "description_gpt_oss_20b", "ko_content_flat_qwen3_30b_a3b_2507_q8_0"])
-            if "keywords" in CORE:
-                candidates.append(["title_gpt_oss_20b", "description_gpt_oss_20b", "ko_content_flat", "keywords", "ko_content_flat_gpt_oss_20b", "ko_content_flat_qwen3_30b_a3b_2507_q8_0"])
-            if all(f in CORE for f in ["title_gpt_oss_20b","description_gpt_oss_20b","ko_content_flat","keywords"]):
-                candidates.append(["title_gpt_oss_20b", "description_gpt_oss_20b", "ko_content_flat", "keywords"])
-            candidates.append(["title_gpt_oss_20b", "description_gpt_oss_20b"])
+        if "title" in CORE:
+            candidates.append(["title"])
+        if all(f in CORE for f in ["title", "description"]):
+            candidates.append(["title", "description"])
+        if all(f in CORE for f in ["title", "description", "ko_content_flat"]):
+            candidates.append(["title", "description", "ko_content_flat"])
+        if all(f in CORE for f in ["title", "description", "ko_content_flat", "keywords"]):
+            candidates.append(["title", "description", "ko_content_flat", "keywords"])
     else:
+        # Full mode:
+        # Explore 2-, 3-, and 4-field combinations from CORE
+        # and optionally augment them with topics/themes.
         for r in (2, 3, 4):
             for combo in combinations(CORE, r):
-                if "title_gpt_oss_20b" not in combo:
-                    continue
                 candidates.append(list(combo))
+
         LIGHTS = [f for f in ["topics", "themes"] if f in eligible]
-        best_core = [set(x) for x in candidates if set(x) <= set(CORE)]
-        for core in best_core:
+        core_sets = [set(x) for x in candidates if set(x) <= set(CORE)]
+        for core_set in core_sets:
             for g in LIGHTS:
-                combo = sorted(core | {g})
+                combo = sorted(core_set | {g})
                 if combo not in candidates:
                     candidates.append(combo)
 
@@ -363,7 +370,7 @@ def main():
         lo, hi = min(vals), max(vals)
         return [(v - lo) / (hi - lo + 1e-12) for v in vals]
 
-    singles = [f for f in ["title_gpt_oss_20b","keywords","description_gpt_oss_20b","ko_content_flat","ko_content_flat_gpt_oss_20b", "ko_content_flat_qwen3_30b_a3b_2507_q8_0","topics","themes"] if f in report]
+    singles = [f for f in ["title", "description", "ko_content_flat", "keywords", "topics", "themes"] if f in report]
     mrr1_map = {tuple([f]): next((r[1] for r in results if r[0] == (f,)), 0.0) for f in singles}
     # mrr2_map = {tuple([f]): next((r[2] for r in results if r[0] == (f,)), 0.0) for f in singles}
 
@@ -403,12 +410,10 @@ def main():
         lines.append(f"{f:22}  FUS={fus[f]:.4f}")
 
     # 4) Suggested schema
-    suggest_rank = ["title_gpt_oss_20b", "description_gpt_oss_20b", "ko_content_flat", "keywords", "ko_content_flat_gpt_oss_20b",
-                    "ko_content_flat_qwen3_30b_a3b_2507_q8_0"]
-    suggest_facets = [
-        "topics", "themes", "languages", "locations_flat", "category", "subcategories", "ko_content_flat_gpt_oss_20b",
-        "ko_content_flat_qwen3_30b_a3b_2507_q8_0", "license", "project_type", "date_of_completion", "creators",
-        "project_acronym"]
+    suggest_rank = ["title", "description", "ko_content_flat", "keywords",]
+    suggest_facets = ["topics", "themes", "languages", "locations_flat", "category", "subcategories", "license",
+                      "project_type", "date_of_completion", "creators", "project_acronym", "project_display_name",
+                      "project_name",]
     lines.append("\n=== SUGGESTED USAGE ===")
     lines.append("Ranking fields (BM25F): " + ", ".join(suggest_rank))
     lines.append("Facet/filter fields    : " + ", ".join([f for f in suggest_facets if f in per_field_text]))

@@ -556,7 +556,7 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
     title = norm_text(ko.get("title"))
     subtitle = norm_text(ko.get("subtitle"))
     desc = norm_text(ko.get("description"))
-    content = norm_text(ko.get("ko_content_flat"))
+    content = norm_text(ko.get("ko_content_flat_qwen3_30b_a3b_thinking_2507_q8_0"))
     keywords = [norm_text(x) for x in (ko.get("keywords") or []) if isinstance(x, str)]
     topics = [norm_text(x) for x in (ko.get("topics") or []) if isinstance(x, str)]
     themes = [norm_text(x) for x in (ko.get("themes") or []) if isinstance(x, str)]
@@ -812,7 +812,7 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
     total = sem_total + cr_total + cf_total + li_total
 
     # Flags and notes
-    empty_fields = [k for k in ["title", "description", "ko_content_flat"] if not norm_text(ko.get(k))]
+    empty_fields = [k for k in ["title", "description", "ko_content_flat_qwen3_30b_a3b_thinking_2507_q8_0"] if not norm_text(ko.get(k))]
     notes = []
     if not url_ok and project_url_raw:
         notes.append("Invalid project_url")

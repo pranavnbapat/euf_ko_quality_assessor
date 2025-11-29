@@ -9,7 +9,12 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 
 # ===== CONFIG =====
-JSON_PATH = "../input/final_output_14_10-2025_17-37-04_for_qa_llmed_runpod.json"
+# JSON_PATH = "../input/final_output_14_10-2025_17-37-04_for_qa_llmed_runpod.json"
+# OUTPUT_PATH = "03_evaluate_chunks.json"
+
+JSON_PATH = "./final_output_14_10-2025_17-37-04_for_qa_llmed_runpod.json" # For online on runpod
+OUTPUT_PATH = "./03_evaluate_chunks.json" # For online on runpod
+
 MODEL_NAME = "roberta-large-mnli"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -147,6 +152,12 @@ def main():
     df["entail_gap_LS_minus_SL"] = df["L_to_S_entail"] - df["S_to_L_entail"]
 
     print(df.to_csv(index=False))
+
+    # ----- SAVE RESULTS -----
+    records = df.to_dict(orient="records")
+
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

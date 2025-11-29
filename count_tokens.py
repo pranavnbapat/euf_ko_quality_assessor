@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 # =======================
 # CONFIG (edit as needed)
 # =======================
-INPUT_PATH = Path("input/final_output_14_10-2025_17-37-04_for_qa_llmed_runpod.json")
+INPUT_PATH = Path("input/final_output_14_10-2025_17-37-04_for_qa_llmed_runpod.jsonb")
 OUTPUT_CSV = Path("output/token_counts.csv")
 LIMIT = None            # set to 10, 20, or None for "all" records
 STRICT_MISSING = False  # if True, raise on missing ko_content_flat; if False, count = 0

@@ -28,8 +28,8 @@ CPU_TOTAL=$(nproc); export OLLAMA_NUM_THREADS=$(( CPU_TOTAL / 2 ))
 # GPU0 -> 11434 (allow 2 models / 2 parallel reqs)
 CUDA_VISIBLE_DEVICES=0 \
 OLLAMA_HOST="0.0.0.0:11434" \
-OLLAMA_MAX_LOADED_MODELS=2 \
-OLLAMA_NUM_PARALLEL=2 \
+OLLAMA_MAX_LOADED_MODELS=1 \
+OLLAMA_NUM_PARALLEL=1 \
 nohup ollama serve > /workspace/ollama-gpu0.log 2>&1 &
 echo $! > /workspace/ollama-gpu0.pid
 
@@ -58,19 +58,29 @@ done
 echo "GPU1 up on 11435"
 
 # Pull & warm models on BOTH instances
-for H in 127.0.0.1:11434 127.0.0.1:11435; do
-  for m in \
-    "qwen3:4b-instruct-2507-q4_K_M" \
-    "qwen3:30b-a3b-instruct-2507-q8_0" \
-    "gpt-oss:20b" \
-    "nomic-embed-text"
-  do
-    if OLLAMA_HOST="$H" ollama pull "$m"; then
-      printf "Hello" | OLLAMA_HOST="$H" ollama run "$m" >/dev/null || true
-    else
-      echo "Skip: $m not found on $H" >&2
-    fi
-  done
+# GPU0 (11434): thinking + embeddings
+for m in \
+  "qwen3:30b-a3b-thinking-2507-q8_0" \
+  "nomic-embed-text"
+do
+  if OLLAMA_HOST="127.0.0.1:11434" ollama pull "$m"; then
+    printf "Hello" | OLLAMA_HOST="127.0.0.1:11434" ollama run "$m" >/dev/null || true
+  else
+    echo "Skip: $m not found on 127.0.0.1:11434" >&2
+  fi
 done
+
+# GPU1 (11435): instruct + embeddings
+for m in \
+  "qwen3:30b-a3b-instruct-2507-q8_0" \
+  "nomic-embed-text"
+do
+  if OLLAMA_HOST="127.0.0.1:11435" ollama pull "$m"; then
+    printf "Hello" | OLLAMA_HOST="127.0.0.1:11435" ollama run "$m" >/dev/null || true
+  else
+    echo "Skip: $m not found on 127.0.0.1:11435" >&2
+  fi
+done
+
 
 echo "Ready: GPU0 on 11434 (PID $(cat /workspace/ollama-gpu0.pid)), GPU1 on 11435 (PID $(cat /workspace/ollama-gpu1.pid))"

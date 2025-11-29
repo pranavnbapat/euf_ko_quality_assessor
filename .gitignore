@@ -1,6 +1,8 @@
 # Ignore Python virtual environment
 .venv/
 venv/
+.venv3.10/
+.venv*/
 
 # Ignore database and credentials
 *.sqlite3
