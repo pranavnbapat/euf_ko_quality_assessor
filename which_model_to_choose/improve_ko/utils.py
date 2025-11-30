@@ -33,38 +33,6 @@ def split_into_tokenish_chunks(text: str, chunk_tok: int, overlap_tok: int) -> L
         i += step
     return chunks
 
-def normalise_model_key(model_tag: str) -> str:
-    """
-    Convert a model tag like:
-        'deepseek-llm:7b-chat-q8_0' -> 'deepseek_7b_q8_0'
-        'llama3.1:8b-instruct-q4_K_M' -> 'llama3.1_8b_q4_K_M'
-    Rules:
-      - split at ':' into family and rest
-      - drop '-llm' suffix in family
-      - replace '-' with '_' in family
-      - in the rest, remove 'chat' and 'instruct' tokens when they appear as dash-separated parts
-      - keep underscores and dots as-is
-    """
-    if ":" in model_tag:
-        family, rest = model_tag.split(":", 1)
-    else:
-        family, rest = model_tag, ""
-
-    # family tweaks
-    family = family.replace("-llm", "")
-    family = family.replace("-", "_")
-
-    # rest tweaks
-    parts = rest.split("-") if rest else []
-    filtered_parts: List[str] = []
-    for part in parts:
-        if part.lower() in {"chat", "instruct"}:
-            continue
-        filtered_parts.append(part)
-
-    suffix = "_".join(filtered_parts) if filtered_parts else ""
-    return f"{family}_{suffix}".strip("_")
-
 # ---- JSON extraction (strict but tolerant) ----
 _JSON_OBJECT_RE = re.compile(r'\{\s*"summary"\s*:\s*"(?:[^"\\]|\\.)*"\s*\}', re.DOTALL)
 
@@ -273,90 +241,69 @@ def extract_cleaned_json(raw: str) -> Dict[str, Any]:
     #     return {"cleaned": cleaned}
 
 
-def extract_metadata_json(raw: str) -> Dict[str, Any]:
+def _strip_code_fences(raw: str) -> str:
     """
-    Parse metadata JSON for improved English metadata:
-
-    Expected shape:
-    {
-      "title_improved": "<title>",
-      "subtitle_improved": "<subtitle or empty string>",
-      "description_improved": "<description>",
-      "keywords_improved": ["kw1", "kw2", ...]
-    }
+    Utility: strip markdown code fences if the model decided to wrap output in ```...```.
     """
     s = (raw or "").strip()
-
-    # Strip code fences
     if s.startswith("```"):
-        s = s.split("```", 1)[-1]
+        # Drop the first fence and keep the rest
+        s = s.split("```", 1)[-1].strip()
     if "```" in s:
+        # Drop anything after the next fence
         s = s.split("```", 1)[0].strip()
+    return s
 
-    obj = None
+
+def extract_metadata_text(raw: str) -> str:
+    """
+    Extract plain text for a single metadata field (title/subtitle/description).
+    We expect the model to return ONLY the final text (no JSON).
+
+    Returns a non-empty string or raises ValueError.
+    """
+    s = _strip_code_fences(raw)
+    if not s:
+        # As a last resort, try to salvage something from raw
+        s = (raw or "").strip()
+    s = s.strip()
+    if not s:
+        raise ValueError("Empty metadata text from model output")
+    return s
+
+
+def extract_metadata_keywords(raw: str) -> List[str]:
+    """
+    Extract a list of keywords from model output.
+
+    Expected behaviour (per METADATA_PROMPT):
+      - A comma-separated list like:
+        social innovation, family carers, flexible work, ireland
+
+    We also tolerate a JSON list ["a", "b"] if the model misbehaves.
+    """
+    s = _strip_code_fences(raw)
+
+    if not s:
+        s = (raw or "").strip()
+    s = s.strip()
+    if not s:
+        raise ValueError("Empty metadata keywords from model output")
+
+    # 1) Try JSON list first (if the model ignored instructions and returned JSON)
     try:
-        obj = json.loads(s)
+        maybe = json.loads(s)
+        if isinstance(maybe, list) and all(isinstance(x, str) for x in maybe):
+            # Normalise whitespace and drop empties
+            kws = [x.strip() for x in maybe if x.strip()]
+            if kws:
+                return kws
     except Exception:
-        # try first JSON object using same brace walker
-        from typing import Optional
-        def extract_first_json_object(text: str) -> Optional[str]:
-            start = text.find("{")
-            if start == -1:
-                return None
-            depth = 0
-            i = start
-            in_str = False
-            escape = False
-            while i < len(text):
-                ch = text[i]
-                if in_str:
-                    if escape:
-                        escape = False
-                    elif ch == "\\":
-                        escape = True
-                    elif ch == "\"":
-                        in_str = False
-                else:
-                    if ch == "\"":
-                        in_str = True
-                    elif ch == "{":
-                        depth += 1
-                    elif ch == "}":
-                        depth -= 1
-                        if depth == 0:
-                            return text[start:i+1]
-                i += 1
-            return None
+        pass
 
-        candidate = extract_first_json_object(s)
-        if candidate:
-            obj = json.loads(candidate)
+    # 2) Fallback: treat as comma-separated text
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("Could not parse any keywords from model output")
+    return parts
 
-    if not isinstance(obj, dict):
-        raise ValueError("Metadata output is not a JSON object")
-
-    required = {"title_improved", "subtitle_improved", "description_improved", "keywords_improved"}
-    missing = required - set(obj.keys())
-    if missing:
-        raise ValueError(f"Metadata JSON missing required keys: {missing}")
-
-    # Type checks
-    if not isinstance(obj["title_improved"], str):
-        raise ValueError("title_improved must be string")
-    if not isinstance(obj["subtitle_improved"], str):
-        raise ValueError("subtitle_improved must be string")
-    if not isinstance(obj["description_improved"], str):
-        raise ValueError("description_improved must be string")
-
-    # Must be a list
-    keywords = obj.get("keywords_improved")
-    if not isinstance(keywords, list) or not all(isinstance(x, str) for x in keywords):
-        raise ValueError("keywords_improved must be a list of strings")
-
-
-    # if not isinstance(keywords, list):
-    #     raise ValueError("keywords_improved must be a list of strings")
-    # if not all(isinstance(x, str) for x in keywords):
-    #     raise ValueError("keywords_improved must be a list of strings")
-
-    return obj

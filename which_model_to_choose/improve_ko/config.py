@@ -50,10 +50,10 @@ INPUT_DIR = PROJECT_ROOT / "input"
 
 # ---------- OLLAMA HOSTS (2× GPU) ----------
 # Primary host (kept for compatibility)
-OLLAMA_HOST = os.environ.get("RUNPOD_OLLAMA_HOST", "https://998adsgormnld2-11434.proxy.runpod.net").rstrip("/")
+OLLAMA_HOST = os.environ.get("RUNPOD_OLLAMA_HOST", "https://wi7pzgyuq8lfri-11434.proxy.runpod.net").rstrip("/")
 
 OLLAMA_HOSTS = {
-    "gpu0": "https://998adsgormnld2-11434.proxy.runpod.net",
+    "gpu0": "https://wi7pzgyuq8lfri-11434.proxy.runpod.net",
 }
 
 MODEL_TO_HOST = {

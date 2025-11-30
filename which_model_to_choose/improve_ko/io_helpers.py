@@ -32,12 +32,3 @@ def append_model_result_dict_mode(augmented: Dict[str, Any], out_path: Path, key
     augmented[key] = value
     atomic_write_json(out_path, augmented)
 
-
-def append_model_result_list_mode(out_items: List[Dict[str, Any]],
-                                  current_snapshot: Dict[str, Any],
-                                  out_path: Path,
-                                  key: str,
-                                  value: Any) -> None:
-    current_snapshot[key] = value
-    # Persist full list snapshot: already-completed items + current in-progress snapshot
-    atomic_write_json(out_path, out_items + [current_snapshot])

@@ -7,15 +7,15 @@ import time
 
 from typing import Any, Dict, List
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (models_available, MODEL_TO_HOST, EXTREME_CTX_THRESHOLD_TOK, NEAR_LIMIT_CTX_THRESHOLD_TOK,
                     DEFAULT_NUM_PREDICT, LONG_NUM_PREDICT, COMBINE_NUM_PREDICT, SUMMARY_MAX_ATTEMPTS, PRIMARY_MODEL)
-from io_helpers import append_model_result_dict_mode, append_model_result_list_mode
+from io_helpers import append_model_result_dict_mode
 from ollama_client import call_ollama, warm_up_models
 from prompts import DEFAULT_PROMPT, COMBINE_PROMPT, CLEAN_PROMPT, METADATA_PROMPT
-from utils import (fmt, approx_token_count, split_into_tokenish_chunks, normalise_model_key, extract_summary_json,
-                   extract_cleaned_json, extract_metadata_json)
+from utils import (fmt, approx_token_count, split_into_tokenish_chunks, extract_summary_json,
+                   extract_cleaned_json, extract_metadata_text, extract_metadata_keywords)
 
 
 def _maybe_cap_ctx(model: str, opts: dict) -> dict:
@@ -199,31 +199,42 @@ def _run_single_model(model: str, content: str) -> str:
     )
 
 
-def _run_metadata(model: str,
-                  summary_en: str,
-                  existing: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _run_metadata_field(
+    model: str,
+    summary_en: str,
+    field: str,
+    existing_value: Any | None = None,
+) -> Any:
     """
-    Generate or refine title/subtitle/description/keywords in British English,
-    based on an English summary and optional existing metadata.
+    Improve a single metadata FIELD ('TITLE', 'SUBTITLE', 'DESCRIPTION', 'KEYWORDS')
+    using the METADATA_PROMPT.
 
-    Returns a dict with keys:
-      - title_improved
-      - subtitle_improved
-      - description_improved
-      - keywords_improved (list of strings)
+    Returns:
+      - For TITLE/SUBTITLE/DESCRIPTION: a string.
+      - For KEYWORDS: a List[str].
     """
+    field = field.upper().strip()
+    if field not in {"TITLE", "SUBTITLE", "DESCRIPTION", "KEYWORDS"}:
+        raise ValueError(f"Unsupported metadata field '{field}'")
 
-    meta_context = ""
-    if existing:
-        meta_context = (
-            "Existing metadata (may be empty):\n"
-            f"TITLE: {existing.get('title', '')}\n"
-            f"SUBTITLE: {existing.get('subtitle', '')}\n"
-            f"DESCRIPTION: {existing.get('description', '')}\n"
-            f"KEYWORDS: {', '.join(existing.get('keywords', []) or [])}\n"
-        )
+    existing_str = ""
+    # For keywords, existing_value may be a list; normalise to comma-separated text
+    if field == "KEYWORDS":
+        if isinstance(existing_value, list):
+            existing_str = ", ".join([str(x) for x in existing_value if str(x).strip()])
+        elif isinstance(existing_value, str):
+            existing_str = existing_value
+    else:
+        if isinstance(existing_value, str):
+            existing_str = existing_value
+        elif existing_value is not None:
+            existing_str = str(existing_value)
 
-    content = f"{meta_context}\n\nSUMMARY:\n{summary_en}"
+    meta_context = (
+        f"FIELD: {field}\n\n"
+        f"EXISTING VALUE:\n{existing_str}\n\n"
+        f"SUMMARY:\n{summary_en}"
+    )
 
     last_err: Exception | None = None
     for attempt in range(1, SUMMARY_MAX_ATTEMPTS + 1):
@@ -235,17 +246,23 @@ def _run_metadata(model: str,
             raw = call_ollama(
                 model,
                 METADATA_PROMPT,
-                content,
+                meta_context,
                 options_override=opts,
                 base_url=MODEL_TO_HOST[model],
             )
-            obj = extract_metadata_json(raw)
-            return obj
+
+            if field == "KEYWORDS":
+                # Expect a list[str]
+                return extract_metadata_keywords(raw)
+            else:
+                # Expect a single string
+                return extract_metadata_text(raw)
+
         except Exception as e:
             last_err = e
             if attempt < SUMMARY_MAX_ATTEMPTS:
                 print(
-                    f"[WARN] _run_metadata: model={model} attempt {attempt} failed "
+                    f"[WARN] _run_metadata_field: field={field} model={model} attempt {attempt} failed "
                     f"with {type(e).__name__}: {e}. Retrying...",
                     file=sys.stderr,
                 )
@@ -254,7 +271,7 @@ def _run_metadata(model: str,
 
     if last_err is not None:
         raise last_err
-    raise RuntimeError("Metadata generation failed after retries")
+    raise RuntimeError(f"Metadata generation for field '{field}' failed after retries")
 
 
 def process_one_dict_item(
@@ -305,6 +322,17 @@ def process_one_dict_item(
         cleaned_field = "ko_content_flat"
         summary_field = "ko_content_flat_summarised"
 
+        if isinstance(content, str) and "No content present" in content:
+            if not augmented_one.get(summary_field):
+                append_model_result_dict_mode(
+                    augmented_one,
+                    out_path,
+                    summary_field,
+                    "No content present",
+                )
+            print(f"[TIMER] Item total (summary): {fmt(time.perf_counter() - t_item)}")
+            return augmented_one
+
         cleaned_text = augmented_one.get(cleaned_field)
         if not isinstance(cleaned_text, str) or not cleaned_text.strip():
             raise KeyError(
@@ -321,34 +349,60 @@ def process_one_dict_item(
         print(f"[TIMER] Item total (summary): {fmt(time.perf_counter() - t_item)}")
         return augmented_one
 
-    # --- METADATA ONLY (requires English summary) ---
+    # --- METADATA ONLY ---
     if mode == "metadata":
-        summary_field = "ko_content_flat_cleaned_summarised"
-        meta_done_field = "metadata_llm_en_done"
+        summary_field = "ko_content_flat_summarised_qwenb_30b_instruct"
+        title_llm_field = "title_llm_en"
 
+        # If we had a "no content" sentinel earlier, just propagate it
+        if isinstance(content, str) and "No content present" in content:
+            if not augmented_one.get(title_llm_field):
+                append_model_result_dict_mode(
+                    augmented_one,
+                    out_path,
+                    title_llm_field,
+                    augmented_one.get("title", "No content present"),
+                )
+            print(f"[TIMER] Item total (metadata): {fmt(time.perf_counter() - t_item)}")
+            return augmented_one
+
+        # Get the summary we will use as context
         summary_en = augmented_one.get(summary_field)
         if not isinstance(summary_en, str) or not summary_en.strip():
             raise KeyError(
                 f"{summary_field} missing or empty; run in 'summary' mode before 'metadata' mode."
             )
 
-        if not augmented_one.get(meta_done_field):
-            if model not in warmed:
-                warm_up_models([model], base_url=MODEL_TO_HOST[model])
-                warmed.add(model)
+        # If we've already created an LLM-enhanced title, do nothing
+        if augmented_one.get(title_llm_field):
+            print(f"[TIMER] Item total (metadata): {fmt(time.perf_counter() - t_item)}")
+            return augmented_one
 
-            existing_meta = {
-                "title": augmented_one.get("title") or "",
-                "subtitle": augmented_one.get("subtitle") or "",
-                "description": augmented_one.get("description") or "",
-                "keywords": augmented_one.get("keywords") or [],
-            }
-            meta = _run_metadata(model, summary_en, existing=existing_meta)
-            append_model_result_dict_mode(augmented_one, out_path, "title_llm_en", meta["title_en"])
-            append_model_result_dict_mode(augmented_one, out_path, "subtitle_llm_en", meta["subtitle_en"])
-            append_model_result_dict_mode(augmented_one, out_path, "description_llm_en", meta["description_en"])
-            append_model_result_dict_mode(augmented_one, out_path, "keywords_llm_en", meta["keywords_en"])
-            append_model_result_dict_mode(augmented_one, out_path, meta_done_field, True)
+        # Warm the model once per item
+        if model not in warmed:
+            warm_up_models([model], base_url=MODEL_TO_HOST[model])
+            warmed.add(model)
+
+        existing_title = augmented_one.get("title", "")
+
+        # Ask the model to improve (or keep) the title
+        improved_title = _run_metadata_field(
+            model=model,
+            summary_en=summary_en,
+            field="TITLE",
+            existing_value=existing_title,
+        )
+
+        # Fallback: never write an empty string – keep original title instead
+        if not isinstance(improved_title, str) or not improved_title.strip():
+            improved_title = existing_title
+
+        append_model_result_dict_mode(
+            augmented_one,
+            out_path,
+            title_llm_field,
+            improved_title,
+        )
 
         print(f"[TIMER] Item total (metadata): {fmt(time.perf_counter() - t_item)}")
         return augmented_one
