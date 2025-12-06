@@ -258,7 +258,12 @@ def _strip_code_fences(raw: str) -> str:
 def extract_metadata_text(raw: str) -> str:
     """
     Extract plain text for a single metadata field (title/subtitle/description).
-    We expect the model to return ONLY the final text (no JSON).
+
+    Preferred behaviour (per METADATA_PROMPT):
+      - Model returns ONLY the final text (no JSON).
+
+    But we also tolerate JSON of the form:
+      {"summary": "..."}
 
     Returns a non-empty string or raises ValueError.
     """
@@ -269,6 +274,19 @@ def extract_metadata_text(raw: str) -> str:
     s = s.strip()
     if not s:
         raise ValueError("Empty metadata text from model output")
+
+    # If the model still returns {"summary": "..."},
+    # unwrap that and return just the inner string.
+    try:
+        maybe = json.loads(s)
+        if isinstance(maybe, dict) and isinstance(maybe.get("summary"), str):
+            inner = maybe["summary"].strip()
+            if inner:
+                return inner
+    except Exception:
+        # Not valid JSON; fall back to returning the raw text.
+        pass
+
     return s
 
 
@@ -280,7 +298,9 @@ def extract_metadata_keywords(raw: str) -> List[str]:
       - A comma-separated list like:
         social innovation, family carers, flexible work, ireland
 
-    We also tolerate a JSON list ["a", "b"] if the model misbehaves.
+    We also tolerate:
+      - a JSON list ["a", "b"]
+      - a JSON object {"summary": "kw1, kw2, kw3"}.
     """
     s = _strip_code_fences(raw)
 
@@ -290,20 +310,25 @@ def extract_metadata_keywords(raw: str) -> List[str]:
     if not s:
         raise ValueError("Empty metadata keywords from model output")
 
-    # 1) Try JSON list first (if the model ignored instructions and returned JSON)
+    # 1) Try JSON forms first
     try:
         maybe = json.loads(s)
+        # JSON list of strings → return directly
         if isinstance(maybe, list) and all(isinstance(x, str) for x in maybe):
-            # Normalise whitespace and drop empties
             kws = [x.strip() for x in maybe if x.strip()]
             if kws:
                 return kws
+        # JSON object with a "summary" field → use that inner text as base
+        if isinstance(maybe, dict) and isinstance(maybe.get("summary"), str):
+            s = maybe["summary"].strip()
     except Exception:
+        # Not JSON or not in supported shape – fall back to raw text
         pass
 
-    # 2) Fallback: treat as comma-separated text
+    # 2) Treat remaining `s` as comma-separated text
     parts = [p.strip() for p in s.split(",") if p.strip()]
     if not parts:
         raise ValueError("Could not parse any keywords from model output")
     return parts
+
 

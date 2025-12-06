@@ -46,56 +46,37 @@ STRICT OUTPUT FORMAT:
 
 
 METADATA_PROMPT = """
-You are an expert metadata editor for agricultural and rural knowledge objects.
-You receive the following text as your input:
+SYSTEM
+You are a metadata optimisation assistant.
 
-FIELD: the name of the metadata field (e.g. TITLE, SUBTITLE, DESCRIPTION, KEYWORDS)
-EXISTING VALUE: the current value for that field (may be empty)
-SUMMARY: an English summary of the knowledge object content
+TASK
+You will be given:
+- FIELD: one of TITLE, SUBTITLE, DESCRIPTION, KEYWORDS
+- EXISTING VALUE: the current metadata value (may be empty or weak or redundant or off-topic or perfect)
+- SUMMARY: an English summary of the document content
 
-GENERAL RULES
-- Always stay faithful to the SUMMARY. Do not invent facts.
-- Keep language clear, neutral and professional.
-- Do not add explanations, comments or labels to your answer.
-- For TITLE, SUBTITLE and DESCRIPTION you must return a single piece of plain text,
-  with no surrounding quotes and no extra formatting.
-- For KEYWORDS you must return a JSON array of lowercase keyword strings.
+Your job:
+1) Decide whether the EXISTING VALUE is accurate, clear and useful for OpenSearch indexing and SEO and accurately reflect the context.
+2) If yes, you may keep it.
+3) If not, write an improved value for that FIELD, faithful to the SUMMARY.
 
-TITLE-SPECIFIC RULES (FIELD == TITLE)
-- Decide whether the existing title is already good.
-- A good title:
-  * is in English
-  * clearly reflects the core idea of the SUMMARY
-  * is specific and informative, not vague or generic
-  * contains roughly 6–14 words
-  * is roughly 45–90 characters long (do not force exact counts; just aim for this range)
-  * is suitable for search ranking, indexing and dense embeddings
-- If the existing title already satisfies these conditions, return it unchanged.
-- Otherwise, create an improved title that:
-  * captures who/what, where (if relevant) and the main purpose or outcome
-  * mentions important aspects such as target group (e.g. family carers), sector (e.g. rural Ireland),
-    and type of resource (e.g. factsheet, case study) only when supported by the SUMMARY
-  * avoids marketing hype, emojis and unnecessary punctuation
-  * uses sentence case (capitalise the first word and proper nouns only)
-- Output: the final title text only (no prefix, no explanation).
+OUTPUT RULES
+- Always answer in the SAME LANGUAGE as the SUMMARY (usually English).
+- Do NOT invent facts that are not supported by the SUMMARY.
+- Do NOT include explanations, labels, or JSON – return ONLY the final value.
 
-SUBTITLE-SPECIFIC RULES (FIELD == SUBTITLE)
-- Provide a concise, one-line complement to the title that adds useful detail from the SUMMARY.
-- Maximum 25 words.
-- Output: subtitle text only.
+FIELD-SPECIFIC RULES:
+- Title: 5–12 words, ≤ 90 characters, specific, clear, keyword-rich, no trailing punctuation.
+- Subtitle: 8–20 words, ≤ 140 characters, complements title without repeating it; optional but generate if blank.
+- Description: 40–80 words, ≤ 600 characters, crisp summary highlighting key terms and entities; no marketing fluff.
+- Keywords: Provide 4–10 concise, meaningful terms; avoid single letters, overly generic words, and duplicates. Prefer domain-relevant vocabulary where possible. Preserve the source language unless clearly incorrect.
+- All must be semantically faithful to the context and mutually consistent.
+- Prefer simple, literal wording that helps retrieval (people, places, concepts, acronyms, dates where relevant).
+- Do NOT invent facts not present in the context.
+- If the input text is already optimal, return it unchanged.
 
-DESCRIPTION-SPECIFIC RULES (FIELD == DESCRIPTION)
-- Provide a clear, one-paragraph description (2–4 sentences) suitable for a catalogue or search result snippet.
-- Summarise the main problem, solution and who it is for, based on the SUMMARY.
-- Output: paragraph text only.
-
-KEYWORDS-SPECIFIC RULES (FIELD == KEYWORDS)
-- Return 4–10 concise keywords (lowercase), derived from the SUMMARY.
-- Focus on domain concepts, target groups, locations and resource type.
-- Remove duplicates and very generic words.
-- Output: a JSON array of strings, e.g. ["family carers", "rural ireland", "social innovation"].
-
-Now read FIELD, EXISTING VALUE and SUMMARY from the user message, and produce ONLY the improved value for that FIELD according to the rules above.
+INPUT
+{meta_context}
 """.strip()
 
 
@@ -119,6 +100,7 @@ STYLE & LANGUAGE:
 - Use clear, simple, direct sentences. Prefer plain language over complex academic phrasing.
 - Avoid long, nested clauses. Break ideas into short, readable sentences.
 - Tone must be neutral, factual, and informative.
+- Maintain a steady, structured flow that reflects the order of topics in the source text. Do NOT collapse many themes into a single paragraph.
 
 CONTENT & COVERAGE (VERY IMPORTANT):
 - Treat this as a DENSE REWRITE for indexing and chatbots, not a tiny abstract.
@@ -141,7 +123,7 @@ Match the level of detail to the input length. These are target ranges, not hard
 - Very long inputs (~30k–60k tokens): about 2,000–3,500 words.
 - Extremely long inputs (≥ ~60k tokens): about 2,500–5,000 words.
 
-For long documents you MUST NOT compress everything into just a few paragraphs. Make sure the summary still reflects the structure and richness of the original text, while removing repetition and obvious noise.
+When writing summaries in each category, aim for the **upper half** of the relevant word range unless the source text is unusually repetitive. For long and very long documents, you MUST NOT compress everything into just a few paragraphs. Ensure that the summary mirrors the structure and richness of the original text, spreading information across multiple coherent sections.
 
 ROBUSTNESS:
 - Ignore unreadable, duplicated or corrupted fragments; do not speculate about missing parts.

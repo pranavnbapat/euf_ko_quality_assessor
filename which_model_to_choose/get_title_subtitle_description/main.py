@@ -15,9 +15,9 @@ from utils import fmt
 
 def main() -> None:
     t_script = time.perf_counter()
-    candidates = list(INPUT_DIR.glob("*_llmed_runpod.json"))
+    candidates = list(INPUT_DIR.glob("*_llmed.json"))
     if not candidates:
-        raise FileNotFoundError(f"No files ending with '_llmed_runpod.json' in: {INPUT_DIR}")
+        raise FileNotFoundError(f"No files ending with '_llmed.json' in: {INPUT_DIR}")
     latest_path = max(candidates, key=lambda p: p.stat().st_mtime)
     data = load_json(latest_path)
 
@@ -28,9 +28,9 @@ def main() -> None:
     if isinstance(data, dict):
         augmented_one = dict(data)
         try:
-            content = data.get("ko_content_flat_gpt_oss_20b")
+            content = data.get("ko_content_flat_summarised_qwenb_30b_instruct")
             if not isinstance(content, str) or not content.strip():
-                raise KeyError("No usable content: 'ko_content_flat_gpt_oss_20b' is empty or not found")
+                raise KeyError("No usable content: 'ko_content_flat_summarised_qwenb_30b_instruct' is empty or not found")
             augmented_one = process_one_dict_item(augmented_one, out_path, content, parallel=True)
             atomic_write_json(out_path, augmented_one)
             print(f"[DONE] Wrote: {out_path}")
@@ -73,9 +73,9 @@ def main() -> None:
             current_snapshot = dict(obj)
 
             try:
-                content = obj.get("ko_content_flat_gpt_oss_20b")
+                content = obj.get("ko_content_flat_summarised_qwenb_30b_instruct")
                 if not isinstance(content, str) or not content.strip():
-                    raise KeyError("No usable content in item: expected 'ko_content_flat_gpt_oss_20b'")
+                    raise KeyError("No usable content in item: expected 'ko_content_flat_summarised_qwenb_30b_instruct'")
                 current_snapshot = process_one_list_item(
                     out_items, current_snapshot, out_path, content, parallel=True
                 )

@@ -249,6 +249,7 @@ def _run_metadata_field(
                 meta_context,
                 options_override=opts,
                 base_url=MODEL_TO_HOST[model],
+                force_no_schema=True
             )
 
             if field == "KEYWORDS":
@@ -352,57 +353,140 @@ def process_one_dict_item(
     # --- METADATA ONLY ---
     if mode == "metadata":
         summary_field = "ko_content_flat_summarised_qwenb_30b_instruct"
-        title_llm_field = "title_llm_en"
+        title_llm_field = "title_llm"
+        subtitle_llm_field = "subtitle_llm"
+        description_llm_field = "description_llm"
+        keywords_llm_field = "keywords_llm"
 
-        # If we had a "no content" sentinel earlier, just propagate it
-        if isinstance(content, str) and "No content present" in content:
+        # 1) Look at the SUMMARY to decide whether to call the LLM at all.
+        summary_en = augmented_one.get(summary_field)
+        summary_text = summary_en if isinstance(summary_en, str) else ""
+
+        # Normalise ko_content_flat to a string for checks
+        raw_content = content if isinstance(content, str) else ""
+
+        # If we had a "no content" sentinel earlier, just propagate a basic title and stop.
+        # No point asking the model for richer metadata without content.
+        if ("No content present" in summary_text or not summary_text.strip() or len(summary_text.split()) < 50):
+            # Title
             if not augmented_one.get(title_llm_field):
                 append_model_result_dict_mode(
                     augmented_one,
                     out_path,
                     title_llm_field,
-                    augmented_one.get("title", "No content present"),
+                    augmented_one.get("title", ""),
                 )
+
+            # Subtitle
+            if not augmented_one.get(subtitle_llm_field):
+                append_model_result_dict_mode(
+                    augmented_one,
+                    out_path,
+                    subtitle_llm_field,
+                    augmented_one.get("subtitle", ""),
+                )
+
+            # Description
+            if not augmented_one.get(description_llm_field):
+                append_model_result_dict_mode(
+                    augmented_one,
+                    out_path,
+                    description_llm_field,
+                    augmented_one.get("description", ""),
+                )
+
+            # Keywords
+            if not augmented_one.get(keywords_llm_field):
+                append_model_result_dict_mode(
+                    augmented_one,
+                    out_path,
+                    keywords_llm_field,
+                    augmented_one.get("keywords", []),
+                )
+
             print(f"[TIMER] Item total (metadata): {fmt(time.perf_counter() - t_item)}")
             return augmented_one
 
-        # Get the summary we will use as context
-        summary_en = augmented_one.get(summary_field)
-        if not isinstance(summary_en, str) or not summary_en.strip():
-            raise KeyError(
-                f"{summary_field} missing or empty; run in 'summary' mode before 'metadata' mode."
-            )
-
-        # If we've already created an LLM-enhanced title, do nothing
-        if augmented_one.get(title_llm_field):
-            print(f"[TIMER] Item total (metadata): {fmt(time.perf_counter() - t_item)}")
-            return augmented_one
-
-        # Warm the model once per item
+        # Warm the model once per item (before any metadata calls),
         if model not in warmed:
             warm_up_models([model], base_url=MODEL_TO_HOST[model])
             warmed.add(model)
 
-        existing_title = augmented_one.get("title", "")
+        # ----- SUBTITLE -----
+        if not augmented_one.get(subtitle_llm_field):
+            existing_subtitle = augmented_one.get("subtitle", "")
+            improved_subtitle = _run_metadata_field(
+                model=model,
+                summary_en=summary_en,
+                field="SUBTITLE",
+                existing_value=existing_subtitle,
+            )
+            # Fallback: if model gives empty/garbage, keep the original value.
+            if not isinstance(improved_subtitle, str) or not improved_subtitle.strip():
+                improved_subtitle = existing_subtitle
+            append_model_result_dict_mode(
+                augmented_one,
+                out_path,
+                subtitle_llm_field,
+                improved_subtitle,
+            )
 
-        # Ask the model to improve (or keep) the title
-        improved_title = _run_metadata_field(
-            model=model,
-            summary_en=summary_en,
-            field="TITLE",
-            existing_value=existing_title,
-        )
+        # ----- DESCRIPTION -----
+        if not augmented_one.get(description_llm_field):
+            existing_description = augmented_one.get("description", "")
+            improved_description = _run_metadata_field(
+                model=model,
+                summary_en=summary_en,
+                field="DESCRIPTION",
+                existing_value=existing_description,
+            )
+            if not isinstance(improved_description, str) or not improved_description.strip():
+                improved_description = existing_description
+            append_model_result_dict_mode(
+                augmented_one,
+                out_path,
+                description_llm_field,
+                improved_description,
+            )
 
-        # Fallback: never write an empty string – keep original title instead
-        if not isinstance(improved_title, str) or not improved_title.strip():
-            improved_title = existing_title
+        # ----- KEYWORDS -----
+        if not augmented_one.get(keywords_llm_field):
+            existing_keywords = augmented_one.get("keywords", [])
+            improved_keywords = _run_metadata_field(
+                model=model,
+                summary_en=summary_en,
+                field="KEYWORDS",
+                existing_value=existing_keywords,
+            )
+            # improved_keywords should be List[str], thanks to extract_metadata_keywords().
+            append_model_result_dict_mode(
+                augmented_one,
+                out_path,
+                keywords_llm_field,
+                improved_keywords,
+            )
 
-        append_model_result_dict_mode(
-            augmented_one,
-            out_path,
-            title_llm_field,
-            improved_title,
-        )
+        # ----- TITLE -----
+        # Only generate title_llm_en if it does not exist yet; this keeps the run idempotent.
+        if not augmented_one.get(title_llm_field):
+            existing_title = augmented_one.get("title", "")
+            improved_title = _run_metadata_field(
+                model=model,
+                summary_en=summary_en,
+                field="TITLE",
+                existing_value=existing_title,
+            )
+
+            # Fallback: never write an empty string – keep original title instead.
+            if not isinstance(improved_title, str) or not improved_title.strip():
+                improved_title = existing_title
+
+            append_model_result_dict_mode(
+                augmented_one,
+                out_path,
+                title_llm_field,
+                improved_title,
+            )
 
         print(f"[TIMER] Item total (metadata): {fmt(time.perf_counter() - t_item)}")
         return augmented_one

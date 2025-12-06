@@ -13,7 +13,7 @@ from requests.adapters import HTTPAdapter, Retry
 
 from config import (
     MAX_RETRIES, RETRY_BACKOFF_SECS, PER_REQUEST_TIMEOUT, REQUEST_KEEP_ALIVE,
-    OLLAMA_HOST, MODEL_OVERRIDES
+    BASE_OLLAMA_HOST, MODEL_OVERRIDES
 )
 
 # Shared session with retries
@@ -36,7 +36,7 @@ def _sleep_with_jitter(seconds: float) -> None:
 
 def warm_up_models(models: List[str], base_url: Optional[str] = None) -> None:
     """Trigger a small streamed request to load graphs before main batch."""
-    host = (base_url or OLLAMA_HOST).rstrip("/")
+    host = (base_url or BASE_OLLAMA_HOST).rstrip("/")
     url = f"{host}/api/generate"
     for m in models:
         try:
@@ -55,12 +55,14 @@ def warm_up_models(models: List[str], base_url: Optional[str] = None) -> None:
 
 def call_ollama(model: str, prompt: str, content: str,
                 options_override: Optional[Dict[str, Any]] = None,
-                base_url: Optional[str] = None) -> str:
+                base_url: Optional[str] = None,
+                force_no_schema: bool = False) -> str:
+
     """
     Core client: handles /api/generate vs /api/chat, JSON schema toggle,
     retries and (streamed) accumulation.
     """
-    host = (base_url or OLLAMA_HOST).rstrip("/")
+    host = (base_url or BASE_OLLAMA_HOST).rstrip("/")
     full_prompt = f"{prompt}\n\n-----\nFILE CONTENT START\n{content}\nFILE CONTENT END\n-----"
 
     ovr = MODEL_OVERRIDES.get(model, {})
@@ -85,10 +87,10 @@ def call_ollama(model: str, prompt: str, content: str,
         opts["num_predict"] = int(ovr["num_predict"])
     opts["temperature"] = 0.2
 
-    if model.startswith("gpt-oss"):
-        use_chat = True if ovr.get("use_chat", True) else False
-        no_schema = True if ovr.get("no_schema", True) else False
-        opts.setdefault("num_predict", 2048)
+    # if model.startswith("gpt-oss"):
+    #     use_chat = True if ovr.get("use_chat", True) else False
+    #     no_schema = True if ovr.get("no_schema", True) else False
+    #     opts.setdefault("num_predict", 2048)
 
     def make_payload(schema: bool, chat: bool) -> tuple[str, dict]:
         common = {
@@ -122,9 +124,10 @@ def call_ollama(model: str, prompt: str, content: str,
             return ("/api/generate", payload)
 
     attempts = [
-        (not no_schema, False),
+        (not (no_schema or force_no_schema), False),
         (False, False),
-        (False, True) if use_chat or model.startswith("gpt-oss") else None,
+        (False, True) if use_chat else None,
+        # (False, True) if use_chat or model.startswith("gpt-oss") else None,
     ]
     attempts = [a for a in attempts if a is not None]
 

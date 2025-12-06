@@ -7,8 +7,7 @@ import time
 
 from typing import Any, Dict, List
 
-from config import INPUT_DIR
-from io_helpers import find_latest_json, load_json, atomic_write_json
+from io_helpers import find_latest_json, load_json, atomic_write_json, get_output_dir
 from pipeline import process_one_dict_item, process_one_list_item
 from utils import fmt
 
@@ -27,9 +26,34 @@ def main() -> None:
             f"Invalid mode '{mode}'. Expected one of: clean, summary, metadata."
         )
 
-    latest_path = find_latest_json(INPUT_DIR)
+    latest_path = find_latest_json()
+
+    # Log which input file and folder we are using
+    print(f"[INFO] Input folder: {latest_path.parent}")
+    print(f"[INFO] Input file:   {latest_path.name}")
+
     data = load_json(latest_path)
-    out_path = latest_path.with_name(latest_path.stem + "_llmed.json")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+    if mode == "summary":
+        suffix = f"_summary_{timestamp}"
+    elif mode == "metadata":
+        suffix = f"_metadata_{timestamp}"
+    elif mode == "clean":
+        suffix = f"_clean_{timestamp}"
+    else:
+        suffix = "_llmed"
+
+    # Ensure we have an output/ folder next to io_helpers.py
+    output_dir = get_output_dir(create=True)
+
+    # Save processed file into output/ instead of input/
+    out_path = output_dir / f"{latest_path.stem}{suffix}.json"
+
+    # Log where the output will be written
+    print(f"[INFO] Output folder: {out_path.parent}")
+    print(f"[INFO] Output file:   {out_path.name}")
+
 
     if isinstance(data, dict):
         augmented_one = dict(data)
@@ -52,7 +76,9 @@ def main() -> None:
                 existing = load_json(out_path)
                 if isinstance(existing, list):
                     out_items = existing
+                    print(f"[INFO] Resuming from existing output file with {len(out_items)} items: {out_path}")
             except Exception:
+                print(f"[WARN] Failed to load existing output file, will overwrite: {out_path}", file=sys.stderr)
                 pass
 
         total = len(data)

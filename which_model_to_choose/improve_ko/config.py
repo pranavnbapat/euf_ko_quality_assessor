@@ -6,6 +6,13 @@ import os
 
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+BASE_OLLAMA_HOST = os.environ.get("RUNPOD_OLLAMA_HOST",).rstrip("/")
+
 # ---------- MODELS ----------
 models_available = [
     "qwen3:30b-a3b-instruct-2507-q8_0",
@@ -15,14 +22,6 @@ models_available = [
 PRIMARY_MODEL = models_available[0]
 
 MODEL_OVERRIDES: dict[str, dict] = {}
-
-# MODEL_OVERRIDES = {
-#     "gpt-oss:latest": {
-#         "no_schema": True,
-#         "use_chat": True,
-#         "num_predict": 2048,
-#     },
-# }
 
 # ---------- SCALING / CHUNKING ----------
 EXTREME_CTX_THRESHOLD_TOK = 128_000
@@ -48,15 +47,10 @@ SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_ROOT = SCRIPT_PATH.parents[1]
 INPUT_DIR = PROJECT_ROOT / "input"
 
-# ---------- OLLAMA HOSTS (2× GPU) ----------
-# Primary host (kept for compatibility)
-OLLAMA_HOST = os.environ.get("RUNPOD_OLLAMA_HOST", "https://wi7pzgyuq8lfri-11434.proxy.runpod.net").rstrip("/")
-
 OLLAMA_HOSTS = {
-    "gpu0": "https://wi7pzgyuq8lfri-11434.proxy.runpod.net",
+    "gpu0": BASE_OLLAMA_HOST,
 }
 
 MODEL_TO_HOST = {
     "qwen3:30b-a3b-instruct-2507-q8_0": OLLAMA_HOSTS["gpu0"],
-    # "gpt-oss:20b": OLLAMA_HOSTS["gpu0"],
 }

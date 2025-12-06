@@ -45,7 +45,7 @@ LANG_PIVOT = os.getenv("LANG_PIVOT", "en")   # pivot language for coverage/stopw
 LANG_MISMATCH_WEIGHT_SHIFT = float(os.getenv("LANG_MISMATCH_WEIGHT_SHIFT", "0.15"))
 NON_LATIN_FRACTION_THRESH = float(os.getenv("NON_LATIN_FRACTION_THRESH", "0.20"))
 
-RUNPOD_OLLAMA_HOST = os.getenv("RUNPOD_OLLAMA_HOST", "https://qaigjfchbeuczr-11435.proxy.runpod.net")
+RUNPOD_OLLAMA_HOST = os.getenv("RUNPOD_OLLAMA_HOST")
 RUNPOD_OLLAMA_EMBED_MODEL = os.getenv("RUNPOD_OLLAMA_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "30"))
 
@@ -476,7 +476,7 @@ def salient_mismatch_penalty(source: str, summary: str) -> float:
     summ = norm_space(summary).lower()
 
     nums = set(_NUM_RE.findall(summ))
-    years = set(re.findall(r"\b(19|20)\d{2}\b", summ))
+    years = set(re.findall(r"\b(?:19|20)\d{2}\b", summ))
 
     bad = 0
     total = 0
