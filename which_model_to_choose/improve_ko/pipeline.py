@@ -352,7 +352,7 @@ def process_one_dict_item(
 
     # --- METADATA ONLY ---
     if mode == "metadata":
-        summary_field = "ko_content_flat_summarised_qwenb_30b_instruct"
+        summary_field = "ko_content_flat_summarised"
         title_llm_field = "title_llm"
         subtitle_llm_field = "subtitle_llm"
         description_llm_field = "description_llm"

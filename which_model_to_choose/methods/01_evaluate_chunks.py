@@ -15,7 +15,7 @@ except LookupError:
     STOPWORDS = set(stopwords.words("english"))
 
 
-JSON_PATH = "../input/final_output_14_10-2025_17-37-04_for_qa_llmed_runpod.json"
+JSON_PATH = "input/final_output_24_11-2025_03-50-22_for_qa_summary_20251205_221423_metadata_20251206_094639.json"
 
 
 # ===== 2. BASIC TEXT HELPERS =====
@@ -231,6 +231,13 @@ def evaluate_candidate(name: str, s_text: str, l_text: str):
 def main():
     data = load_json(JSON_PATH)
 
+    if isinstance(data, dict):
+        data = [data]
+
+    if not isinstance(data, list):
+        print("Unexpected JSON format; expected list or single object.")
+        return
+
     if isinstance(data, list):
         all_results = []
 
@@ -238,12 +245,12 @@ def main():
             l_text, candidates = find_chunks(obj)
 
             if not l_text:
-                print("No 'ko_content_flat' found in JSON. Cannot evaluate.")
-                return
+                print(f"[record {idx}] No 'ko_content_flat' found, skipping.")
+                continue
 
             if not candidates:
-                print("No candidate chunks starting with 'ko_content_flat'* found.")
-                return
+                print(f"[record {idx}] No candidate chunks starting with 'ko_content_flat'*, skipping.")
+                continue
 
             print(f"Found {len(candidates)} candidate(s) to compare with 'ko_content_flat' in record {idx}.\n")
 

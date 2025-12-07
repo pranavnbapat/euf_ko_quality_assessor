@@ -1,0 +1,13 @@
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install --upgrade pip
+pip install \
+    orjson \
+    pandas \
+    langdetect \
+    transformers \
+    torch \
+    hf_transfer
+
+python ko_quality_assessor.py
