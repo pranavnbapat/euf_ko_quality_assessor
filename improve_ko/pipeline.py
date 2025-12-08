@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 
@@ -15,8 +16,10 @@ from io_helpers import append_model_result_dict_mode
 from ollama_client import call_ollama, warm_up_models
 from prompts import DEFAULT_PROMPT, COMBINE_PROMPT, CLEAN_PROMPT, METADATA_PROMPT
 from utils import (fmt, approx_token_count, split_into_tokenish_chunks, extract_summary_json,
-                   extract_cleaned_json, extract_metadata_text, extract_metadata_keywords)
+                   extract_cleaned_json, extract_metadata_text, extract_metadata_keywords, should_summarise_text)
 
+
+logger = logging.getLogger(__name__)
 
 def _maybe_cap_ctx(model: str, opts: dict) -> dict:
     if model.startswith("qwen3:30b") or model.startswith("gpt-oss:20b"):
@@ -81,10 +84,12 @@ def _run_cleaning(model: str, content: str) -> str:
         except Exception as e:
             last_err = e
             if attempt < SUMMARY_MAX_ATTEMPTS:
-                print(
-                    f"[WARN] _run_cleaning: model={model} attempt {attempt} failed "
-                    f"with {type(e).__name__}: {e}. Retrying...",
-                    file=sys.stderr,
+                logger.warning(
+                    "_run_cleaning: model=%s attempt %d failed with %s: %s. Retrying...",
+                    model,
+                    attempt,
+                    type(e).__name__,
+                    e,
                 )
                 continue
             break
@@ -181,10 +186,13 @@ def _run_single_model(model: str, content: str) -> str:
             # Capture and optionally retry
             last_err = e
             if attempt < SUMMARY_MAX_ATTEMPTS:
-                print(
-                    f"[WARN] {_run_single_model.__name__}: model={model} attempt {attempt} failed "
-                    f"with {type(e).__name__}: {e}. Retrying...",
-                    file=sys.stderr,
+                logger.warning(
+                    "%s: model=%s attempt %d failed with %s: %s. Retrying...",
+                    _run_single_model.__name__,
+                    model,
+                    attempt,
+                    type(e).__name__,
+                    e,
                 )
                 continue
             else:
@@ -262,11 +270,8 @@ def _run_metadata_field(
         except Exception as e:
             last_err = e
             if attempt < SUMMARY_MAX_ATTEMPTS:
-                print(
-                    f"[WARN] _run_metadata_field: field={field} model={model} attempt {attempt} failed "
-                    f"with {type(e).__name__}: {e}. Retrying...",
-                    file=sys.stderr,
-                )
+                logger.warning("_run_metadata_field: field=%s model=%s attempt %d failed with %s: %s. Retrying...",
+                               field, model, attempt, type(e).__name__, e,)
                 continue
             break
 
@@ -280,6 +285,7 @@ def process_one_dict_item(
     out_path,
     content: str,
     mode: str,
+    log_timer: bool = True,
 ) -> Dict[str, Any]:
     """
     mode:
@@ -288,7 +294,7 @@ def process_one_dict_item(
       - "metadata": only write *_llm_en fields (requires summary)
     """
 
-    t_item = time.perf_counter()
+    t_item = time.perf_counter() if log_timer else None
     warmed: set[str] = set()
 
     model = PRIMARY_MODEL  # from config
@@ -305,7 +311,8 @@ def process_one_dict_item(
                     cleaned_field,
                     "No content present",
                 )
-            print(f"[TIMER] Item total (clean): {fmt(time.perf_counter() - t_item)}")
+            if log_timer and t_item is not None:
+                logger.info("Item total (clean): %s", fmt(time.perf_counter() - t_item))
             return augmented_one
 
         if not augmented_one.get(cleaned_field):
@@ -314,8 +321,10 @@ def process_one_dict_item(
                 warmed.add(model)
             cleaned_text = _run_cleaning(model, content)
             append_model_result_dict_mode(augmented_one, out_path, cleaned_field, cleaned_text)
+
         # nothing else in this run
-        print(f"[TIMER] Item total (clean): {fmt(time.perf_counter() - t_item)}")
+        if log_timer and t_item is not None:
+            logger.info("Item total (clean): %s", fmt(time.perf_counter() - t_item))
         return augmented_one
 
     # --- SUMMARY ONLY (requires cleaned) ---
@@ -331,7 +340,8 @@ def process_one_dict_item(
                     summary_field,
                     "No content present",
                 )
-            print(f"[TIMER] Item total (summary): {fmt(time.perf_counter() - t_item)}")
+            if log_timer and t_item is not None:
+                logger.info("Item total (summary): %s", fmt(time.perf_counter() - t_item))
             return augmented_one
 
         cleaned_text = augmented_one.get(cleaned_field)
@@ -340,6 +350,18 @@ def process_one_dict_item(
                 f"{cleaned_field} missing or empty; run in 'clean' mode before 'summary' mode."
             )
 
+        if not should_summarise_text(cleaned_text):
+            if not augmented_one.get(summary_field):
+                append_model_result_dict_mode(
+                    augmented_one,
+                    out_path,
+                    summary_field,
+                    cleaned_text,
+                )
+            if log_timer and t_item is not None:
+                logger.info("Item total (summary): %s", fmt(time.perf_counter() - t_item))
+            return augmented_one
+
         if not augmented_one.get(summary_field):
             if model not in warmed:
                 warm_up_models([model], base_url=MODEL_TO_HOST[model])
@@ -347,7 +369,8 @@ def process_one_dict_item(
             summary_en = _run_single_model(model, cleaned_text)
             append_model_result_dict_mode(augmented_one, out_path, summary_field, summary_en)
 
-        print(f"[TIMER] Item total (summary): {fmt(time.perf_counter() - t_item)}")
+        if log_timer and t_item is not None:
+            logger.info("Item total (summary): %s", fmt(time.perf_counter() - t_item))
         return augmented_one
 
     # --- METADATA ONLY ---
@@ -404,7 +427,8 @@ def process_one_dict_item(
                     augmented_one.get("keywords", []),
                 )
 
-            print(f"[TIMER] Item total (metadata): {fmt(time.perf_counter() - t_item)}")
+            if log_timer and t_item is not None:
+                logger.info("Item total (metadata): %s", fmt(time.perf_counter() - t_item))
             return augmented_one
 
         # Warm the model once per item (before any metadata calls),
@@ -488,7 +512,8 @@ def process_one_dict_item(
                 improved_title,
             )
 
-        print(f"[TIMER] Item total (metadata): {fmt(time.perf_counter() - t_item)}")
+        if log_timer and t_item is not None:
+            logger.info("Item total (metadata): %s", fmt(time.perf_counter() - t_item))
         return augmented_one
 
     raise ValueError(f"Unsupported mode '{mode}'. Expected 'clean', 'summary', or 'metadata'.")
@@ -507,7 +532,20 @@ def process_one_list_item(
 
     # Reuse single-item logic; this function mostly exists so we can
     # keep the calling pattern in main.py the same.
-    updated = process_one_dict_item(current_snapshot, out_path, content, mode=mode)
+    updated = process_one_dict_item(
+        current_snapshot,
+        out_path,
+        content,
+        mode=mode,
+        log_timer=False,
+    )
 
-    print(f"[TIMER] Item total ({mode}): {fmt(time.perf_counter() - t_item)}")
+    orig_id = current_snapshot.get("_orig_id") or current_snapshot.get("id") or "UNKNOWN"
+
+    logger.info(
+        "Item total (%s) _orig_id=%s: %s",
+        mode,
+        orig_id,
+        fmt(time.perf_counter() - t_item),
+    )
     return updated

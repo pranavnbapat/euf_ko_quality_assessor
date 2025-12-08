@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 
@@ -11,6 +12,11 @@ from io_helpers import find_latest_json, load_json, atomic_write_json, get_outpu
 from pipeline import process_one_dict_item, process_one_list_item
 from utils import fmt
 
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 def main() -> None:
     t_script = time.perf_counter()

@@ -332,3 +332,36 @@ def extract_metadata_keywords(raw: str) -> List[str]:
     return parts
 
 
+MIN_TOKENS_FOR_SUMMARY = 60
+
+def should_summarise_text(text: str) -> bool:
+    """
+    Decide whether we should send `text` to the LLM for summarisation.
+
+    Heuristics:
+      - skip empty / whitespace-only content
+      - skip very short content (few tokens)
+      - optionally skip content that looks like UI noise
+        (few letters compared to total characters)
+    """
+    if not isinstance(text, str):
+        return False
+
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    # Use approx_token_count to stay consistent with your existing logic
+    token_est = approx_token_count(stripped)
+    if token_est < MIN_TOKENS_FOR_SUMMARY:
+        # Too short to gain anything from summarisation
+        return False
+
+    # Optional: avoid very "UI-like" content (tons of punctuation/digits/bullets)
+    letters = sum(c.isalpha() for c in stripped)
+    if letters and (letters / len(stripped)) < 0.4:
+        # Less than 40% letters → likely technical/UI noise
+        return False
+
+    return True
+
