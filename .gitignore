@@ -41,10 +41,3 @@ testing/
 !requirements.txt
 
 data_model_v2/
-
-# Allow JSONs in improve_ko input/output
-!improve_ko/
-!improve_ko/input/
-!improve_ko/input/*.json
-!improve_ko/output/
-!improve_ko/output/*.json
