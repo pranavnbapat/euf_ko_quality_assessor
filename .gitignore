@@ -42,8 +42,9 @@ testing/
 
 data_model_v2/
 
-# Keep JSONs for the improve_ko pipeline
+# Allow JSONs in improve_ko input/output
+!improve_ko/
 !improve_ko/input/
-!which_model_to_choose/improve_ko/input/*.json
+!improve_ko/input/*.json
 !improve_ko/output/
-!which_model_to_choose/improve_ko/output/*.json
+!improve_ko/output/*.json
