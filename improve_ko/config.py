@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_OLLAMA_HOST = os.environ.get("RUNPOD_OLLAMA_HOST",).rstrip("/")
+LLM_BACKEND = os.environ.get("LLM_BACKEND", "ollama").strip().lower()
 
 # ---------- MODELS ----------
 models_available = [

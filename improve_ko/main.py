@@ -21,16 +21,29 @@ logging.basicConfig(
 def main() -> None:
     t_script = time.perf_counter()
 
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         raise SystemExit(
-            "Usage: python -m which_model_to_choose.improve_ko.main "
-            "[clean|summary|metadata]"
+            "Usage: python -m improve_ko.main "
+            "[clean|summary|metadata] [--shard-index i --num-shards n]"
         )
     mode = sys.argv[1].strip().lower()
     if mode not in {"clean", "summary", "metadata"}:
         raise SystemExit(
             f"Invalid mode '{mode}'. Expected one of: clean, summary, metadata."
         )
+
+    shard_index = 0
+    num_shards = 1
+    args = sys.argv[2:]
+    if "--shard-index" in args:
+        i = args.index("--shard-index")
+        shard_index = int(args[i + 1])
+    if "--num-shards" in args:
+        i = args.index("--num-shards")
+        num_shards = int(args[i + 1])
+
+    if not (0 <= shard_index < num_shards):
+        raise SystemExit(f"Invalid shard config: index={shard_index}, total={num_shards}")
 
     latest_path = find_latest_json()
 
@@ -42,13 +55,19 @@ def main() -> None:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
 
     if mode == "summary":
-        suffix = f"_summary_{timestamp}"
+        base_suffix = "_summary"
     elif mode == "metadata":
-        suffix = f"_metadata_{timestamp}"
+        base_suffix = "_metadata"
     elif mode == "clean":
-        suffix = f"_clean_{timestamp}"
+        base_suffix = "_clean"
     else:
-        suffix = "_llmed"
+        base_suffix = "_llmed"
+
+    # Make filenames distinct per shard when using multiple shards
+    if num_shards > 1:
+        suffix = f"{base_suffix}_sh{shard_index + 1}-of-{num_shards}_{timestamp}"
+    else:
+        suffix = f"{base_suffix}_{timestamp}"
 
     # Ensure we have an output/ folder next to io_helpers.py
     output_dir = get_output_dir(create=True)
@@ -87,23 +106,43 @@ def main() -> None:
                 print(f"[WARN] Failed to load existing output file, will overwrite: {out_path}", file=sys.stderr)
                 pass
 
+        # Build a set of already-processed IDs for robust resume
+        processed_ids = set()
+        for item in out_items:
+            if isinstance(item, dict):
+                pid = item.get("_orig_id") or item.get("id")
+                if pid is not None:
+                    processed_ids.add(pid)
+
         total = len(data)
         for idx, obj in enumerate(data, 1):
             if not isinstance(obj, dict):
                 print(f"[WARN] Skipping non-dict item at index {idx}", file=sys.stderr)
                 continue
-            print(f"[INFO] Item {idx}/{total}")
 
-            if len(out_items) >= idx:
-                continue  # already persisted
+            # Sharding: only process items assigned to this shard.
+            # idx is 1-based; convert to 0-based for modulo division.
+            if (idx - 1) % num_shards != shard_index:
+                continue
+
+            # Decide the identifier for this KO
+            orig_id = obj.get("_orig_id") or obj.get("id") or idx
+
+            # Skip if already processed (robust resume)
+            if orig_id in processed_ids:
+                continue
+
+            print(f"[INFO] Item {idx}/{total}")
 
             current_snapshot = dict(obj)
             try:
                 content = obj.get("ko_content_flat")
                 if not isinstance(content, str) or not content.strip():
                     raise KeyError("'ko_content_flat' missing or empty")
+
                 current_snapshot = process_one_list_item(out_items, current_snapshot, out_path, content, mode=mode)
                 out_items.append(current_snapshot)
+                processed_ids.add(orig_id)
                 atomic_write_json(out_path, out_items)
             except KeyboardInterrupt:
                 atomic_write_json(out_path, out_items + [current_snapshot])

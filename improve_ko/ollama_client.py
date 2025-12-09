@@ -13,8 +13,8 @@ from requests.adapters import HTTPAdapter, Retry
 
 from config import (
     MAX_RETRIES, RETRY_BACKOFF_SECS, PER_REQUEST_TIMEOUT, REQUEST_KEEP_ALIVE,
-    BASE_OLLAMA_HOST, MODEL_OVERRIDES
-)
+    BASE_OLLAMA_HOST, MODEL_OVERRIDES, LLM_BACKEND)
+
 
 # Shared session with retries
 _session = requests.Session()
@@ -37,6 +37,26 @@ def _sleep_with_jitter(seconds: float) -> None:
 def warm_up_models(models: List[str], base_url: Optional[str] = None) -> None:
     """Trigger a small streamed request to load graphs before main batch."""
     host = (base_url or BASE_OLLAMA_HOST).rstrip("/")
+
+    if LLM_BACKEND == "vllm":
+        # Warm up via vLLM's OpenAI-compatible endpoint instead.
+        url = f"{host}/v1/chat/completions"
+        for m in models:
+            try:
+                payload = {
+                    "model": m,
+                    "messages": [
+                        {"role": "system", "content": "Warm-up request, you can reply briefly."},
+                        {"role": "user", "content": "hi"},
+                    ],
+                    "max_tokens": 4,
+                    "temperature": 0.0,
+                }
+                _session.post(url, json=payload, timeout=(10, 30))
+            except Exception:
+                pass  # non-fatal
+        return
+
     url = f"{host}/api/generate"
     for m in models:
         try:
@@ -53,6 +73,53 @@ def warm_up_models(models: List[str], base_url: Optional[str] = None) -> None:
         except Exception:
             pass  # non-fatal
 
+def _call_vllm_openai_chat(
+    model: str,
+    prompt: str,
+    content: str,
+    options_override: Optional[Dict[str, Any]] = None,
+    base_url: Optional[str] = None,
+) -> str:
+    """
+    Call vLLM's OpenAI-compatible /v1/chat/completions endpoint.
+
+    - Non-streaming: we get the full response as one JSON object.
+    - Returns the assistant's message content as a plain string.
+    """
+    host = (base_url or BASE_OLLAMA_HOST).rstrip("/")
+    url = f"{host}/v1/chat/completions"
+
+    full_prompt = f"{prompt}\n\n-----\nFILE CONTENT START\n{content}\nFILE CONTENT END\n-----"
+
+    openai_payload: Dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Answer directly. Return only the required JSON object."},
+            {"role": "user", "content": full_prompt},
+        ],
+        "temperature": 0.2,
+    }
+
+    # Optional: honour max_tokens / num_ctx from options_override
+    if options_override:
+        max_tokens = options_override.get("num_predict")
+        if isinstance(max_tokens, int):
+            openai_payload["max_tokens"] = max_tokens
+
+    r = _session.post(url, json=openai_payload, timeout=PER_REQUEST_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+
+    try:
+        content_text = data["choices"][0]["message"]["content"]
+    except Exception:
+        raise RuntimeError(f"vLLM/OpenAI response missing content: {data!r}")
+
+    content_text = (content_text or "").strip()
+    if not content_text:
+        raise RuntimeError("Empty response from vLLM/OpenAI backend")
+    return content_text
+
 def call_ollama(model: str, prompt: str, content: str,
                 options_override: Optional[Dict[str, Any]] = None,
                 base_url: Optional[str] = None,
@@ -62,6 +129,17 @@ def call_ollama(model: str, prompt: str, content: str,
     Core client: handles /api/generate vs /api/chat, JSON schema toggle,
     retries and (streamed) accumulation.
     """
+
+    # If backend is vLLM/OpenAI, bypass Ollama-specific logic entirely.
+    if LLM_BACKEND == "vllm":
+        return _call_vllm_openai_chat(
+            model=model,
+            prompt=prompt,
+            content=content,
+            options_override=options_override,
+            base_url=base_url,
+        )
+
     host = (base_url or BASE_OLLAMA_HOST).rstrip("/")
     full_prompt = f"{prompt}\n\n-----\nFILE CONTENT START\n{content}\nFILE CONTENT END\n-----"
 

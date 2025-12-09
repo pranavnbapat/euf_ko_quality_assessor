@@ -370,7 +370,30 @@ def main():
         lo, hi = min(vals), max(vals)
         return [(v - lo) / (hi - lo + 1e-12) for v in vals]
 
-    singles = [f for f in ["title", "description", "ko_content_flat", "keywords", "topics", "themes"] if f in report]
+    singles = [
+        f for f in [
+            "title",
+            "subtitle",
+            "description",
+            "ko_content_flat",
+            "keywords",
+            "topics",
+            "themes",
+            "languages",
+            "locations_flat",
+            "category",
+            "subcategories",
+            "license",
+            "project_type",
+            "date_of_completion",
+            "creators",
+            "project_acronym",
+            "project_display_name",
+            "project_name",
+        ]
+        if f in report
+    ]
+
     mrr1_map = {tuple([f]): next((r[1] for r in results if r[0] == (f,)), 0.0) for f in singles}
     # mrr2_map = {tuple([f]): next((r[2] for r in results if r[0] == (f,)), 0.0) for f in singles}
 
