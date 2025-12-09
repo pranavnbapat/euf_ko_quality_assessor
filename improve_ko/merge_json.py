@@ -5,10 +5,6 @@ import re
 from pathlib import Path
 
 # --- CONFIG -------------------------------------------------------------
-
-# Folder where your shard JSONs live.
-# If you run this script from improve_ko/, "." is fine.
-# If you run it from repo root, point this to the folder with the JSONs.
 INPUT_DIR = Path("output")
 
 # Base prefix of the run – everything before `_summary_sh...`
@@ -88,7 +84,6 @@ for path in files_to_merge:
     if not isinstance(data, list):
         raise TypeError(
             f"Expected a list in {path.name}, got {type(data).__name__}. "
-            "If your shards are not lists, adjust the merge logic."
         )
 
     # Extend the merged list with all items from this shard

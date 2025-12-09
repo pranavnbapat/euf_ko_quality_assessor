@@ -83,3 +83,40 @@ python main.py summary \
   --shard-index 1 --num-shards 2 &
 ```
 
+Or
+```
+CUDA_VISIBLE_DEVICES=0,1 \
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507-AWQ \
+  --tensor-parallel-size 2 \
+  --max-model-len 180000 \
+  --dtype auto \
+  --gpu-memory-utilization 0.90 \
+  --port 8000
+```
+```
+CUDA_VISIBLE_DEVICES=0,1 \
+python -m vllm.entrypoints.openai.api_server \
+  --model stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ \
+  --served-model-name qwen3:30b-a3b-instruct-2507-q8_0 \
+  --tensor-parallel-size 2 \
+  --dtype auto \
+  --max-model-len 32768 \
+  --max-num-seqs 4 \
+  --gpu-memory-utilization 0.85 \
+  --enforce-eager \
+  --port 8000
+```
+
+```
+RUNPOD_OLLAMA_HOST="https://<your_id>-8000.proxy.runpod.net" \
+LLM_BACKEND="vllm" \
+python -m which_model_to_choose.improve_ko.main summary \
+  --shard-index 0 --num-shards 2 &
+```
+
+```
+RUNPOD_OLLAMA_HOST="https://<your_id>-8000.proxy.runpod.net" \
+LLM_BACKEND="vllm" \
+python -m which_model_to_choose.improve_ko.main summary \
+  --shard-index 1 --num-shards 2 &
+```

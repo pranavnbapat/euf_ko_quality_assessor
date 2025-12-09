@@ -6,12 +6,14 @@ import logging
 import sys
 import time
 
+from tiktoken import get_encoding
 from typing import Any, Dict, List
 
 # from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (models_available, MODEL_TO_HOST, EXTREME_CTX_THRESHOLD_TOK, NEAR_LIMIT_CTX_THRESHOLD_TOK,
-                    DEFAULT_NUM_PREDICT, LONG_NUM_PREDICT, COMBINE_NUM_PREDICT, SUMMARY_MAX_ATTEMPTS, PRIMARY_MODEL)
+                    CHUNK_TARGET_TOK, CHUNK_OVERLAP_TOK, DEFAULT_NUM_PREDICT, LONG_NUM_PREDICT, COMBINE_NUM_PREDICT,
+                    SUMMARY_MAX_ATTEMPTS, PRIMARY_MODEL, LLM_BACKEND)
 from io_helpers import append_model_result_dict_mode
 from ollama_client import call_ollama, warm_up_models
 from prompts import DEFAULT_PROMPT, COMBINE_PROMPT, CLEAN_PROMPT, METADATA_PROMPT
@@ -21,9 +23,57 @@ from utils import (fmt, approx_token_count, split_into_tokenish_chunks, extract_
 
 logger = logging.getLogger(__name__)
 
+_enc = get_encoding("cl100k_base")
+
+def estimate_tokens(text: str) -> int:
+    """Approximate token count with cl100k_base (Qwen-compatible enough)."""
+    return len(_enc.encode(text))
+
+def split_by_tokens(text: str, max_tokens: int, overlap: int = 256) -> List[str]:
+    """
+    Split text into token-limited chunks with optional overlapping window.
+    - max_tokens: maximum tokens per chunk (input-side only).
+    - overlap: number of tokens to carry over between chunks.
+    """
+    ids = _enc.encode(text)
+    n = len(ids)
+    chunks = []
+
+    start = 0
+    while start < n:
+        end = min(start + max_tokens, n)
+        chunk_ids = ids[start:end]
+        chunks.append(_enc.decode(chunk_ids))
+
+        if end >= n:
+            break
+
+        # step back by overlap to avoid hard cuts
+        start = max(0, end - overlap)
+
+    return chunks
+
 def _maybe_cap_ctx(model: str, opts: dict) -> dict:
+    """
+    Normalise context-related options depending on backend.
+
+    - For vLLM (OpenAI-compatible endpoint):
+        * We completely ignore `num_ctx` – context is controlled by
+          `--max-model-len` on the server, not per-request.
+        * We keep `num_predict` → mapped to `max_tokens` in ollama_client._call_vllm_openai_chat().
+    - For Ollama:
+        * Keep a conservative cap on `num_ctx` for big models.
+    """
+    if LLM_BACKEND == "vllm":
+        # vLLM's /v1/chat/completions does not know about num_ctx.
+        # Deleting it avoids giving the illusion that it is honoured.
+        opts.pop("num_ctx", None)
+        return opts
+
+    # Ollama backend – keep older safety cap for qwen3 / gpt-oss models.
     if model.startswith("qwen3:30b") or model.startswith("gpt-oss:20b"):
         opts["num_ctx"] = min(opts.get("num_ctx", 32768), 32768)
+
     return opts
 
 def _run_cleaning(model: str, content: str) -> str:
@@ -38,12 +88,25 @@ def _run_cleaning(model: str, content: str) -> str:
     for attempt in range(1, SUMMARY_MAX_ATTEMPTS + 1):
         try:
             if tok > EXTREME_CTX_THRESHOLD_TOK:
-                chunks = split_into_tokenish_chunks(content, 16_000, 400)
+                # Token-true chunking via tiktoken; sizes controlled via config.py
+                # chunks = split_by_tokens(
+                #     content,
+                #     max_tokens=CHUNK_TARGET_TOK,
+                #     overlap=CHUNK_OVERLAP_TOK,
+                # )
+                chunks = split_into_tokenish_chunks(content, CHUNK_TARGET_TOK, CHUNK_OVERLAP_TOK)
+
                 cleaned_parts: List[str] = []
+
                 for ch in chunks:
                     opts = _maybe_cap_ctx(
                         model,
-                        {"num_ctx": 32768, "num_predict": DEFAULT_NUM_PREDICT, "temperature": 0.1},
+                        {
+                            # For vLLM: num_ctx will be dropped; num_predict still used
+                            "num_ctx": 32768,
+                            "num_predict": DEFAULT_NUM_PREDICT,
+                            "temperature": 0.1,
+                        },
                     )
                     raw_part = call_ollama(
                         model,
@@ -108,12 +171,25 @@ def _run_single_model(model: str, content: str) -> str:
     for attempt in range(1, SUMMARY_MAX_ATTEMPTS + 1):
         try:
             if tok > EXTREME_CTX_THRESHOLD_TOK:
-                chunks = split_into_tokenish_chunks(content, 16_000, 400)
+                # Very long input → map–reduce summarisation
+                # 1) Map step: summarise token-limited chunks
+                # chunks = split_by_tokens(
+                #     content,
+                #     max_tokens=CHUNK_TARGET_TOK,
+                #     overlap=CHUNK_OVERLAP_TOK,
+                # )
+                chunks = split_into_tokenish_chunks(content, CHUNK_TARGET_TOK, CHUNK_OVERLAP_TOK)
                 partials: List[str] = []
+
                 for ch in chunks:
                     map_opts = _maybe_cap_ctx(
                         model,
-                        {"num_ctx": 32768, "num_predict": DEFAULT_NUM_PREDICT, "temperature": 0.2},
+                        {
+                            # vLLM: num_ctx dropped, num_predict → max_tokens
+                            "num_ctx": 32768,
+                            "num_predict": DEFAULT_NUM_PREDICT,
+                            "temperature": 0.2,
+                        },
                     )
                     raw_part = call_ollama(
                         model,
@@ -128,10 +204,15 @@ def _run_single_model(model: str, content: str) -> str:
                         raise ValueError("Empty partial summary from model")
                     partials.append(part_summary)
 
+                # 2) Reduce step: combine partial summaries into one
                 combined_input = "\n\n---- PARTIAL SUMMARY ----\n".join(partials)
                 combine_opts = _maybe_cap_ctx(
                     model,
-                    {"num_ctx": 32768, "num_predict": COMBINE_NUM_PREDICT, "temperature": 0.2},
+                    {
+                        "num_ctx": 32768,
+                        "num_predict": COMBINE_NUM_PREDICT,
+                        "temperature": 0.2,
+                    },
                 )
                 raw_combined = call_ollama(
                     model,
@@ -149,7 +230,7 @@ def _run_single_model(model: str, content: str) -> str:
             elif tok > NEAR_LIMIT_CTX_THRESHOLD_TOK:
                 near_opts = _maybe_cap_ctx(
                     model,
-                    {"num_ctx": 131072, "num_predict": LONG_NUM_PREDICT, "temperature": 0.2},
+                    {"num_ctx": 32768, "num_predict": LONG_NUM_PREDICT, "temperature": 0.2},
                 )
                 raw = call_ollama(
                     model,

@@ -50,7 +50,6 @@ def find_latest_json(input_dir: Path | None = None) -> Path:
     Return the path to the most recently modified *.json file.
 
     By default, it looks in the input/ folder that lives next to this file.
-    You can still pass a custom input_dir if you really want to.
     """
     # If no directory is provided, use the sibling input/ folder
     if input_dir is None:

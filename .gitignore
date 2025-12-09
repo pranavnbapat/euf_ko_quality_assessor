@@ -35,6 +35,7 @@ testing/
 
 *.deb
 *.csv
+*.tsv
 *.json*
 *.xls*
 *.txt

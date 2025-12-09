@@ -5,11 +5,14 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from tiktoken import get_encoding
 
 from typing import Any, Dict, List
 
+from config import COMBINE_NUM_PREDICT
 from io_helpers import find_latest_json, load_json, atomic_write_json, get_output_dir
 from pipeline import process_one_dict_item, process_one_list_item
+from prompts import DEFAULT_PROMPT
 from utils import fmt
 
 
@@ -18,9 +21,20 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+def estimate_tokens(text: str, model_name: str = "qwen") -> int:
+    """
+    Estimate tokens using Qwen/LLaMA-compatible BPE.
+    """
+    enc = get_encoding("cl100k_base")   # closest to Qwen tokenizer
+    return len(enc.encode(text))
+
+
 def main() -> None:
     t_script = time.perf_counter()
 
+    # ---------------------------------------------------------------
+    # Parse CLI arguments
+    # ---------------------------------------------------------------
     if len(sys.argv) < 2:
         raise SystemExit(
             "Usage: python -m improve_ko.main "
@@ -45,6 +59,9 @@ def main() -> None:
     if not (0 <= shard_index < num_shards):
         raise SystemExit(f"Invalid shard config: index={shard_index}, total={num_shards}")
 
+    # ---------------------------------------------------------------
+    # Load input file
+    # ---------------------------------------------------------------
     latest_path = find_latest_json()
 
     # Log which input file and folder we are using
@@ -54,6 +71,9 @@ def main() -> None:
     data = load_json(latest_path)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
 
+    # ---------------------------------------------------------------
+    # Output file setup
+    # ---------------------------------------------------------------
     if mode == "summary":
         base_suffix = "_summary"
     elif mode == "metadata":
@@ -80,12 +100,29 @@ def main() -> None:
     print(f"[INFO] Output file:   {out_path.name}")
 
 
+    # ---------------------------------------------------------------
+    # DICT INPUT
+    # ---------------------------------------------------------------
     if isinstance(data, dict):
         augmented_one = dict(data)
         try:
             content = data.get("ko_content_flat")
             if not isinstance(content, str) or not content.strip():
                 raise KeyError("'ko_content_flat' missing or empty")
+
+            # ---------------- TOKEN CHECK (DICT CASE) ----------------
+            prompt_tokens = estimate_tokens(DEFAULT_PROMPT)
+            content_tokens = estimate_tokens(content)
+            requested_tokens = COMBINE_NUM_PREDICT
+            total_needed = prompt_tokens + content_tokens + requested_tokens
+
+            print(f"[TOKENS] prompt={prompt_tokens}, input={content_tokens}, "
+                  f"generation={requested_tokens}, total={total_needed}")
+
+            if total_needed > 28_000:
+                print("⚠️ WARNING: This KO exceeds the safe context window for 2×A40. "
+                      "You may need to chunk the input.")
+
             augmented_one = process_one_dict_item(augmented_one, out_path, content, mode=mode)
             atomic_write_json(out_path, augmented_one)
             print(f"[DONE] Wrote: {out_path}")
@@ -96,6 +133,8 @@ def main() -> None:
 
     elif isinstance(data, list):
         out_items: List[Dict[str, Any]] = []
+
+        # Resume logic
         if out_path.exists():
             try:
                 existing = load_json(out_path)
@@ -139,6 +178,19 @@ def main() -> None:
                 content = obj.get("ko_content_flat")
                 if not isinstance(content, str) or not content.strip():
                     raise KeyError("'ko_content_flat' missing or empty")
+
+                # ---------------- TOKEN CHECK (LIST CASE) ----------------
+                prompt_tokens = estimate_tokens(DEFAULT_PROMPT)
+                content_tokens = estimate_tokens(content)
+                requested_tokens = COMBINE_NUM_PREDICT
+                total_needed = prompt_tokens + content_tokens + requested_tokens
+
+                print(f"[TOKENS] prompt={prompt_tokens}, input={content_tokens}, "
+                      f"generation={requested_tokens}, total={total_needed}")
+
+                if total_needed > 28_000:
+                    print("⚠️ WARNING: This KO exceeds the safe context window for 2×A40. "
+                          "You may need to chunk the input.")
 
                 current_snapshot = process_one_list_item(out_items, current_snapshot, out_path, content, mode=mode)
                 out_items.append(current_snapshot)

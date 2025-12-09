@@ -137,7 +137,6 @@ OUTPUT SHAPE EXAMPLE:
 
 
 
-
 COMBINE_PROMPT = """
 You will receive multiple partial summaries (British English) of one document.
 
@@ -148,6 +147,8 @@ Combine them into a single coherent, flowing summary for OpenSearch indexing:
 - Do not invent new material; rely only on the given summaries.
 - Do not shorten aggressively; preserve detail.
 
-Return ONLY:
+STRICT OUTPUT (MANDATORY):
+Return ONLY a single JSON object. No extra text, no preamble, no markdown, no comments.
+The JSON MUST have exactly these keys and nothing else:
 {"summary":"<combined summary>"}
 """.strip()
