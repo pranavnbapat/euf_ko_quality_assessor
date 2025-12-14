@@ -17,22 +17,30 @@ LLM_BACKEND = os.environ.get("LLM_BACKEND", "ollama").strip().lower()
 # ---------- MODELS ----------
 models_available = [
     "qwen3:30b-a3b-instruct-2507-q8_0",
-    # "gpt-oss:20b"
 ]
 
 PRIMARY_MODEL = models_available[0]
 
-MODEL_OVERRIDES: dict[str, dict] = {}
+MODEL_OVERRIDES: dict[str, dict] = {
+    "qwen3:30b-a3b-instruct-2507-q8_0": {
+        # Slightly wider sample window than the Ollama default
+        "top_p": 0.9,
+        "top_k": 40,
+
+        # Light repetition penalty to avoid loops without distorting phrasing
+        "repeat_penalty": 1.05,
+    },
+}
 
 # ---------- SCALING / CHUNKING ----------
-EXTREME_CTX_THRESHOLD_TOK = 24_000
-NEAR_LIMIT_CTX_THRESHOLD_TOK = 16_000
-CHUNK_TARGET_TOK = 12_000
-CHUNK_OVERLAP_TOK = 512
+EXTREME_CTX_THRESHOLD_TOK = 128_000
+NEAR_LIMIT_CTX_THRESHOLD_TOK = 110_000
+CHUNK_TARGET_TOK = 16_000
+CHUNK_OVERLAP_TOK = 400
 
-DEFAULT_NUM_PREDICT = 1536
-LONG_NUM_PREDICT = 3072
-COMBINE_NUM_PREDICT = 4096
+DEFAULT_NUM_PREDICT = 2048
+LONG_NUM_PREDICT = 4096
+COMBINE_NUM_PREDICT = 8192
 
 # How many times to re-call the model if parsing/summary fails or is empty
 SUMMARY_MAX_ATTEMPTS = 3

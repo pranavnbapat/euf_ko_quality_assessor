@@ -155,20 +155,19 @@ def call_ollama(model: str, prompt: str, content: str,
         if token_count <= 30_000:     return {"num_ctx": 32768,  "num_predict": 2048}
         if token_count <= 60_000:     return {"num_ctx": 65536,  "num_predict": 3072}
         if token_count <= 110_000:    return {"num_ctx": 131072, "num_predict": 4096}
-        return {"num_ctx": 32768,     "num_predict": 2048}  # must chunk
+        return {"num_ctx": 32768,     "num_predict": 2048}
 
     opts = decide_ctx_and_predict(approx_tokens)
     if options_override:
+        # Allow per-call overrides from the pipeline (clean vs summary vs combine)
         opts.update(options_override)
 
-    if "num_predict" in ovr:
-        opts["num_predict"] = int(ovr["num_predict"])
-    opts["temperature"] = 0.2
+    # Pull selected knobs from MODEL_OVERRIDES (per-model defaults)
+    for key in ("num_predict", "temperature", "top_p", "top_k", "repeat_penalty"):
+        if key in ovr:
+            opts[key] = ovr[key]
 
-    # if model.startswith("gpt-oss"):
-    #     use_chat = True if ovr.get("use_chat", True) else False
-    #     no_schema = True if ovr.get("no_schema", True) else False
-    #     opts.setdefault("num_predict", 2048)
+    opts.setdefault("temperature", 0.2)
 
     def make_payload(schema: bool, chat: bool) -> tuple[str, dict]:
         common = {

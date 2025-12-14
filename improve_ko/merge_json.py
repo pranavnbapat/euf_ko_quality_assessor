@@ -77,8 +77,17 @@ if answer not in {"y", "yes"}:
 merged: list = []
 
 for path in files_to_merge:
+    print(f"Loading {path.name} ...")
+
     with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            print(
+                f"\nJSON error while reading {path.name}: "
+                f"{e.msg} at line {e.lineno}, column {e.colno} (char {e.pos})"
+            )
+            raise
 
     # We expect each shard file to contain a JSON list (e.g. [ {...}, {...} ])
     if not isinstance(data, list):

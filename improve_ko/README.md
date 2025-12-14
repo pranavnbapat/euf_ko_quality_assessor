@@ -11,6 +11,9 @@ source .venv-vllm/bin/activate
 
 pip install --upgrade pip
 pip install vllm transformers accelerate hf_transfer huggingface_hub
+
+export HF_HUB_ENABLE_HF_TRANSFER=1
+export LOGLEVEL=INFO
 ```
 
 This ensures:
@@ -83,7 +86,17 @@ python main.py summary \
   --shard-index 1 --num-shards 2 &
 ```
 
+```
+CUDA_VISIBLE_DEVICES=0,1 \
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-14B-Instruct \
+    --dtype auto \
+    --max-model-len 32768 \
+    --port 8000
+```
+
 Or
+
 ```
 CUDA_VISIBLE_DEVICES=0,1 \
 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507-AWQ \

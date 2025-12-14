@@ -1,4 +1,4 @@
-# which_model_to_choose/improve_ko/utils.py
+# improve_ko/utils.py
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-# which_model_to_choose/improve_ko/main.py
+# improve_ko_vllm/main.py
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-def estimate_tokens(text: str, model_name: str = "qwen") -> int:
+def estimate_tokens(text: str) -> int:
     """
     Estimate tokens using Qwen/LLaMA-compatible BPE.
     """

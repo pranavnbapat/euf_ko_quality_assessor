@@ -25,7 +25,6 @@ TOKENIZER_MODEL = "deepseek-ai/deepseek-llm-7b-chat"
 tok = AutoTokenizer.from_pretrained(TOKENIZER_MODEL, use_fast=True)
 
 def count_tokens(text: str) -> int:
-    """Count tokens roughly matching what your GGUF model will see."""
     # NOTE: add_special_tokens=False so we count only content tokens
     return len(tok.encode(text, add_special_tokens=False))
 
