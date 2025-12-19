@@ -14,12 +14,6 @@ AGRI_EMB_MODEL_NAME = os.environ.get("AGRI_EMB_MODEL_NAME", "all-mpnet-base-v2")
 _EMB_MODEL: Optional[SentenceTransformer] = None
 _DOMAIN_CENTROID: Optional[np.ndarray] = None
 
-AGRI_PROTOTYPES: List[str] = [
-    "Practical information about agriculture and farming, including crops, soil, irrigation, fertilisation, livestock and dairy production.",
-    "Guidance for farmers on managing fields, animals, plant health, animal health, pests, diseases and sustainable farm management.",
-    "Technical content related to agricultural practices, crop management, livestock husbandry, feed, fertilisers, pesticides and farm biosecurity.",
-]
-
 
 def _load_emb_model() -> None:
     """
