@@ -344,7 +344,6 @@ def length_flag(stats: Dict[str, int], min_tokens: int, max_tokens: int) -> bool
 def translate_to_en(text: str, src_lang: str) -> str:
     """
     Stub for future translation from src_lang to English.
-    Currently returns the original text. Plug DeepL/Google/etc. here later.
     """
     if not text or not src_lang or src_lang.startswith("en"):
         return text
@@ -580,7 +579,7 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
     desc_len = length_stats(desc)
     content_len = length_stats(content)
 
-    # Domain-tuned "OK" ranges (adjust if needed)
+    # Domain-tuned "OK" ranges
     title_length_ok = length_flag(title_len, min_tokens=4, max_tokens=18)
     subtitle_length_ok = (not subtitle) or length_flag(subtitle_len, 4, 25)
     description_length_ok = length_flag(desc_len, 40, 150)      # ~40–150 tokens
@@ -719,7 +718,7 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
     category_l = category.strip().lower() if category else ""
     license_l = license_raw.strip().lower() if license_raw else ""
 
-    # 0) Presence/cardinality hard rules you specified
+    # 0) Presence/cardinality hard rules
     #    - intended_purposes: >=1
     #    - license: exactly 1 (non-blank)
     #    - category: exactly 1 (non-blank)

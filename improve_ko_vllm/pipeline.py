@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from config import (
     MODEL_TO_HOST,
@@ -20,11 +20,57 @@ from config import (
 )
 from io_helpers import append_model_result_dict_mode
 from llm_client import call_vllm_chat, warm_up_models
-from prompts import (DEFAULT_PROMPT, COMBINE_PROMPT, CLEAN_PROMPT, METADATA_PROMPT)
+from prompts import (CLEAN_PROMPT, METADATA_PROMPT, LOW_CDS_PROMPT, DEFAULT_PROMPT, HIGH_CDS_PROMPT,
+                     NOISY_SOURCE_PROMPT, CHUNK_SUMMARY_PROMPT, COMBINE_PROMPT)
 from utils import (fmt, approx_token_count, split_into_tokenish_chunks, extract_summary_json, extract_cleaned_json,
                    extract_metadata_text, extract_metadata_keywords, should_summarise_text)
 
 logger = logging.getLogger(__name__)
+
+def _select_summary_prompt(augmented_one: Dict[str, Any], text_field: str = "ko_content_flat",) -> Tuple[str, str]:
+    """
+    Choose a summarisation prompt using diagnostics if available.
+    Falls back to DEFAULT_PROMPT if no metrics exist.
+    Returns:
+      (prompt_name, prompt_text)
+    """
+    metrics = augmented_one.get(f"{text_field}_metrics", {})
+    if not isinstance(metrics, dict):
+        return "DEFAULT", DEFAULT_PROMPT
+
+    tokens = metrics.get("tokens")
+    noise = metrics.get("noise_ratio_non_alnum")
+    flags = metrics.get("field_quality_flags") or []
+    bigram_rep = metrics.get("bigram_repetition_ratio")
+    ent_density = metrics.get("entity_density_per_100_tokens")
+    centroid = metrics.get("mean_centroid_cosine_similarity")
+    drift = metrics.get("first_last_block_cosine_similarity")
+
+    flagset = {str(x) for x in flags} if isinstance(flags, list) else set()
+
+    if (
+            "very_hard_to_read" in flagset
+            or "truncated_for_spacy" in flagset
+            or (isinstance(noise, (int, float)) and noise >= 0.12)
+            or (isinstance(drift, (int, float)) and drift < 0.35)
+    ):
+        return "NOISY_SOURCE", NOISY_SOURCE_PROMPT
+
+    # 2) HIGH_CDS: dense/technical content worth preserving in detail
+    # Use entity density as a strong proxy (works well across languages).
+    if isinstance(ent_density, (int, float)) and ent_density >= 6.0:
+        return "HIGH_CDS", HIGH_CDS_PROMPT
+
+    # 3) LOW_CDS: repetitive / redundant content where we can compress harder
+    if (
+            (isinstance(centroid, (int, float)) and centroid > 0.85)
+            or (isinstance(bigram_rep, (int, float)) and bigram_rep > 0.22)
+            or (isinstance(tokens, int) and tokens >= 8000)  # optional: cost-control for long docs
+    ):
+        return "LOW_CDS", LOW_CDS_PROMPT
+
+    # Default band or unknown values
+    return "DEFAULT", DEFAULT_PROMPT
 
 
 def _run_cleaning(model: str, content: str) -> str:
@@ -73,7 +119,7 @@ def _run_cleaning(model: str, content: str) -> str:
                 raise
 
 
-def _run_single_model(model: str, content: str) -> str:
+def _run_single_model(model: str, content: str, prompt: str) -> str:
     tok = approx_token_count(content)
 
     for attempt in range(1, SUMMARY_MAX_ATTEMPTS + 1):
@@ -87,7 +133,7 @@ def _run_single_model(model: str, content: str) -> str:
                 for ch in chunks:
                     raw = call_vllm_chat(
                         model,
-                        DEFAULT_PROMPT,
+                        CHUNK_SUMMARY_PROMPT,
                         ch,
                         options_override={"max_tokens": DEFAULT_NUM_PREDICT},
                         base_url=MODEL_TO_HOST[model],
@@ -112,7 +158,7 @@ def _run_single_model(model: str, content: str) -> str:
 
             raw = call_vllm_chat(
                 model,
-                DEFAULT_PROMPT,
+                prompt,
                 content,
                 options_override={"max_tokens": max_toks},
                 base_url=MODEL_TO_HOST[model],
@@ -206,7 +252,7 @@ def process_one_dict_item(
 
     # --- SUMMARY ONLY (requires cleaned) ---
     if mode == "summary":
-        cleaned_field = "ko_content_flat"
+        # cleaned_field = "ko_content_flat_clean"
         summary_field = "ko_content_flat_summarised"
 
         if isinstance(content, str) and "No content present" in content:
@@ -221,19 +267,25 @@ def process_one_dict_item(
                 logger.info("Item total (summary): %s", fmt(time.perf_counter() - t_item))
             return augmented_one
 
-        cleaned_text = augmented_one.get(cleaned_field)
+        # Prefer cleaned text if it exists, but DO NOT require it.
+        # Some pipelines skip the cleaning stage entirely.
+        cleaned_text = augmented_one.get("ko_content_flat_cleaned")
         if not isinstance(cleaned_text, str) or not cleaned_text.strip():
-            raise KeyError(
-                f"{cleaned_field} missing or empty; run in 'clean' mode before 'summary' mode."
-            )
+            cleaned_text = augmented_one.get("ko_content_flat_clean")  # backwards compatibility
 
-        if not should_summarise_text(cleaned_text):
+        # Fall back to raw ko_content_flat passed into this function.
+        source_text = cleaned_text if isinstance(cleaned_text, str) and cleaned_text.strip() else content
+
+        if not isinstance(source_text, str) or not source_text.strip():
+            raise KeyError("'ko_content_flat' missing or empty")
+
+        if not should_summarise_text(source_text):
             if not augmented_one.get(summary_field):
                 append_model_result_dict_mode(
                     augmented_one,
                     out_path,
                     summary_field,
-                    cleaned_text,
+                    source_text,
                 )
             if log_timer and t_item is not None:
                 logger.info("Item total (summary): %s", fmt(time.perf_counter() - t_item))
@@ -243,11 +295,32 @@ def process_one_dict_item(
             if model not in warmed:
                 warm_up_models([model], base_url=MODEL_TO_HOST[model])
                 warmed.add(model)
-            summary_en = _run_single_model(model, cleaned_text)
+
+            # prompt = _select_summary_prompt(augmented_one, text_field="ko_content_flat")
+            prompt_name, prompt_text = _select_summary_prompt(augmented_one, text_field="ko_content_flat")
+            ko_id = augmented_one.get("_orig_id") or augmented_one.get("id") or augmented_one.get("identifier") or "unknown"
+
+            m = augmented_one.get("ko_content_flat_metrics", {})
+            tok = m.get("tokens") if isinstance(m, dict) else None
+            noise = m.get("noise_ratio_non_alnum") if isinstance(m, dict) else None
+            drift = m.get("first_last_block_cosine_similarity") if isinstance(m, dict) else None
+            ent = m.get("entity_density_per_100_tokens") if isinstance(m, dict) else None
+            rep = m.get("bigram_repetition_ratio") if isinstance(m, dict) else None
+            flags = m.get("field_quality_flags") if isinstance(m, dict) else None
+
+            logger.info(
+                "Summarise: id=%s model=%s prompt=%s tokens=%s noise=%s drift=%s ent_dens=%s bigram_rep=%s flags=%s",
+                ko_id, model, prompt_name, tok, noise, drift, ent, rep, flags
+            )
+
+            summary_en = _run_single_model(model, source_text, prompt=prompt_text)
+
+            # summary_en = _run_single_model(model, source_text, prompt=prompt)
             append_model_result_dict_mode(augmented_one, out_path, summary_field, summary_en)
 
         if log_timer and t_item is not None:
             logger.info("Item total (summary): %s", fmt(time.perf_counter() - t_item))
+
         return augmented_one
 
     # --- METADATA ONLY ---

@@ -47,7 +47,25 @@ def _salvage_single_field_from_truncated(raw: str, field: str) -> Optional[Dict[
         return None
     s = raw.strip()
 
-    anchor = f'{{"{field}":"'
+    anchor_patterns = [
+        f'{{"{field}":"',
+        f'{{ "{field}" : "',
+        f'{{\n"{field}":"',
+        f'{{\n  "{field}":"',
+    ]
+
+    anchor = None
+    for pat in anchor_patterns:
+        idx = s.find(pat)
+        if idx != -1:
+            anchor = pat
+            i = idx
+            break
+
+    if anchor is None:
+        return None
+
+
     i = s.find(anchor)
     if i == -1:
         return None

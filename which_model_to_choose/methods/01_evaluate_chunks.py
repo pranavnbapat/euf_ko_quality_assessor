@@ -1,5 +1,18 @@
 # which_model_to_choose/methods/01_evaluate_chunks.py
 
+"""
+This script compares alternative versions of `ko_content_flat` (e.g. summarised
+or cleaned variants) against the original full text.
+
+It measures how much each candidate compresses the original, how much vocabulary
+and phrasing from the source is retained, and whether the result looks structurally
+reasonable (length, readability, repetition).
+
+The goal is not linguistic perfection, but to provide a lightweight, comparable
+signal for deciding which content variant is safest and most useful for search
+indexing and downstream QA.
+"""
+
 import json
 import re
 from collections import Counter
@@ -219,7 +232,7 @@ def evaluate_candidate(name: str, s_text: str, l_text: str):
         "len_tokens_l": token_len(l_text),
     }
 
-    # heuristic here 👇
+    # heuristic
     coverage = metrics["rouge1_recall_s_vs_l"]
     heuristic_score = coverage * 1.0 + (0.15 * (1 - comp))
     metrics["heuristic_score"] = heuristic_score

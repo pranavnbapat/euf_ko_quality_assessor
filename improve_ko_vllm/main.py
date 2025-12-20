@@ -9,7 +9,7 @@ from tiktoken import get_encoding
 
 from typing import Any, Dict, List
 
-from config import COMBINE_NUM_PREDICT
+from config import COMBINE_NUM_PREDICT, NEAR_LIMIT_CTX_THRESHOLD_TOK, EXTREME_CTX_THRESHOLD_TOK
 from io_helpers import find_latest_json, load_json, atomic_write_json, get_output_dir
 from pipeline import process_one_dict_item, process_one_list_item
 from prompts import DEFAULT_PROMPT
@@ -119,9 +119,11 @@ def main() -> None:
             print(f"[TOKENS] prompt={prompt_tokens}, input={content_tokens}, "
                   f"generation={requested_tokens}, total={total_needed}")
 
-            if total_needed > 28_000:
-                print("⚠️ WARNING: This KO exceeds the safe context window for 2×A40. "
-                      "You may need to chunk the input.")
+            if total_needed > NEAR_LIMIT_CTX_THRESHOLD_TOK:
+                print(
+                    f"⚠️ WARNING: This KO is near the vLLM context limit "
+                    f"({total_needed} / {EXTREME_CTX_THRESHOLD_TOK}). Chunking may be required."
+                )
 
             augmented_one = process_one_dict_item(augmented_one, out_path, content, mode=mode)
             atomic_write_json(out_path, augmented_one)
@@ -200,9 +202,11 @@ def main() -> None:
                 print(f"[TOKENS] prompt={prompt_tokens}, input={content_tokens}, "
                       f"generation={requested_tokens}, total={total_needed}")
 
-                if total_needed > 28_000:
-                    print("⚠️ WARNING: This KO exceeds the safe context window for 2×A40. "
-                          "You may need to chunk the input.")
+                if total_needed > NEAR_LIMIT_CTX_THRESHOLD_TOK:
+                    print(
+                        f"⚠️ WARNING: This KO is near the vLLM context limit "
+                        f"({total_needed} / {EXTREME_CTX_THRESHOLD_TOK}). Chunking may be required."
+                    )
 
                 current_snapshot = process_one_list_item(out_items, current_snapshot, out_path, content, mode=mode)
                 out_items.append(current_snapshot)

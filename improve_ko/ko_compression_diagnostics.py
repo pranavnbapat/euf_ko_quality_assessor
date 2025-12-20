@@ -492,7 +492,6 @@ def clean_ko_content_chunks(chunks: list[str]) -> str:
     s = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", s)
 
     # 8) Light de-noising of obvious repeated headers (exact matches only, safe)
-    #    Here: drop duplicate standalone "Brassica Fact Sheet" lines
     s = re.sub(r"(?m)^\s*Brassica\s+Fact\s+Sheet\s*$", "", s)
 
     # [NEW] Deduplicate exact lines (helps when PDFs repeat headers/URLs verbatim)

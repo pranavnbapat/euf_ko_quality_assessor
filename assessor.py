@@ -157,7 +157,7 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
     category_l = category.strip().lower() if category else ""
     license_l = license_raw.strip().lower() if license_raw else ""
 
-    # 0) Presence/cardinality hard rules you specified
+    # 0) Presence/cardinality hard rules
     #    - intended_purposes: >=1
     #    - license: exactly 1 (non-blank)
     #    - category: exactly 1 (non-blank)

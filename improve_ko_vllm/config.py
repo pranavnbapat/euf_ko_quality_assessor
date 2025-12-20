@@ -12,35 +12,29 @@ load_dotenv()
 # ------------------------------------------------------------------
 # vLLM / OpenAI-compatible endpoint
 # ------------------------------------------------------------------
-BASE_VLLM_HOST = os.environ["RUNPOD_VLLM_HOST"].rstrip("/")
+RUNPOD_VLLM_HOST = os.environ["RUNPOD_VLLM_HOST"].rstrip("/")
 
+# Canonical base URL for vLLM (OpenAI-compatible)
+BASE_VLLM_HOST = RUNPOD_VLLM_HOST
 
-# ------------------------------------------------------------------
-# Models
-# ------------------------------------------------------------------
-models_available = [
-    "qwen3:30b-a3b-instruct-2507-q8_0",
-]
+PRIMARY_MODEL = os.environ["VLLM_MODEL"].strip()
 
-PRIMARY_MODEL = models_available[0]
+MODEL_TO_HOST = {PRIMARY_MODEL: RUNPOD_VLLM_HOST}
 
-MODEL_TO_HOST = {
-    PRIMARY_MODEL: BASE_VLLM_HOST,
-}
-
+VLLM_MAX_MODEL_LEN = int(os.getenv("VLLM_MAX_MODEL_LEN", "131072"))
 
 # ------------------------------------------------------------------
 # Chunking / token logic
 # ------------------------------------------------------------------
-EXTREME_CTX_THRESHOLD_TOK = 128_000
-NEAR_LIMIT_CTX_THRESHOLD_TOK = 110_000
+EXTREME_CTX_THRESHOLD_TOK = VLLM_MAX_MODEL_LEN - 3_000  # safety margin
+NEAR_LIMIT_CTX_THRESHOLD_TOK = int(VLLM_MAX_MODEL_LEN * 0.85)
 
 CHUNK_TARGET_TOK = 16_000
 CHUNK_OVERLAP_TOK = 400
 
 DEFAULT_NUM_PREDICT = 2048
 LONG_NUM_PREDICT = 4096
-COMBINE_NUM_PREDICT = 8192
+COMBINE_NUM_PREDICT = 24576
 
 SUMMARY_MAX_ATTEMPTS = 3
 

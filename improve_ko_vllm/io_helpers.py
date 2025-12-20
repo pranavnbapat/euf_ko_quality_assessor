@@ -1,4 +1,4 @@
-# which_model_to_choose/improve_ko/io_helpers.py
+# improve_ko_vllm/io_helpers.py
 
 from __future__ import annotations
 
@@ -8,12 +8,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Union
 
 
-# Base directory: folder where this io_helpers.py lives
-_BASE_DIR = Path(__file__).resolve().parent
+# Base directory: project root (parent of improve_ko_vllm/)
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _PACKAGE_DIR.parent
 
-# input/ and output/ folders on the same level as this file
-INPUT_DIR = _BASE_DIR / "input"
-OUTPUT_DIR = _BASE_DIR / "output"
+# input/ and output/ folders live at project root
+INPUT_DIR = _PROJECT_ROOT / "input"
+OUTPUT_DIR = _PROJECT_ROOT / "output"
 
 
 def get_input_dir() -> Path:
