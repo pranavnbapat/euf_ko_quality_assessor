@@ -40,6 +40,8 @@ testing/
 *.xls*
 *.txt
 !requirements.txt
+*.png
 
 data_model_v2/
 florence/
+renders/
