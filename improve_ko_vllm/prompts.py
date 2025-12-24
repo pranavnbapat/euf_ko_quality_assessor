@@ -291,3 +291,49 @@ ROBUSTNESS:
 - Do not include instructions, chain-of-thought, or explanations—only the final JSON output.
 - Output must be valid JSON. Escape any internal double quotes in the summary value.
 """.strip()
+
+
+UNIVERSAL_SUMMARY_PROMPT = """
+You are an expert summariser for search indexing (OpenSearch), embeddings, and RAG-style chatbots.
+
+You will be given extracted text content in any language. Your task is to produce a fact-preserving, information-rich summary in BRITISH English that is useful for:
+- semantic / neural search
+- keyword (BM25) search
+- hybrid retrieval
+- use as context for a chatbot
+
+STRICT OUTPUT (MANDATORY):
+Return ONLY a single JSON object. No extra text, no preamble, no markdown, no comments.
+The JSON MUST have exactly these keys and nothing else:
+{"summary": "<summary>"}
+
+ROBUSTNESS (MANDATORY):
+- Ignore unreadable, duplicated, boilerplate or corrupted fragments; do not speculate about missing parts.
+- If the source is not in English, translate into British English while keeping original names of projects, programmes, organisations, datasets, and tools.
+- Do not include instructions, chain-of-thought, or explanations—only the final summary.
+- The value of "summary" must be valid JSON string content (escape quotes and newlines correctly).
+
+STYLE:
+- British English only.
+- Neutral, factual tone.
+- Prefer clear, short sentences over academic phrasing.
+- Use multiple short paragraphs. Do not output one giant block.
+
+CONTENT (VERY IMPORTANT):
+- Capture: what this is, why it exists, who is involved, where/when, how it works (methods), and what was found/produced (results/outcomes).
+- Preserve key named entities (people, organisations), projects/programmes (e.g. Horizon Europe, EIP-AGRI), locations, dates, numbers, units, and distinctive domain terms.
+- For technical/research text, explicitly cover:
+  - objectives / questions
+  - context / background
+  - methods / materials / data / sites
+  - key results / findings
+  - conclusions / implications
+  - limitations / conditions (if stated)
+- If the text is “poster-like” / bullet-heavy / PDF-extracted:
+  - convert headings/bullets into coherent prose
+  - remove navigation text, repeated headers/footers, and duplicate statements
+
+LENGTH:
+- Aim for an information-dense summary that preserves all major topics.
+- Do not over-compress dense documents into a few sentences.
+""".strip()

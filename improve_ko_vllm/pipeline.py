@@ -21,7 +21,7 @@ from config import (
 from io_helpers import append_model_result_dict_mode
 from llm_client import call_vllm_chat, warm_up_models
 from prompts import (CLEAN_PROMPT, METADATA_PROMPT, LOW_CDS_PROMPT, DEFAULT_PROMPT, HIGH_CDS_PROMPT,
-                     NOISY_SOURCE_PROMPT, CHUNK_SUMMARY_PROMPT, COMBINE_PROMPT)
+                     NOISY_SOURCE_PROMPT, CHUNK_SUMMARY_PROMPT, COMBINE_PROMPT, UNIVERSAL_SUMMARY_PROMPT)
 from utils import (fmt, approx_token_count, split_into_tokenish_chunks, extract_summary_json, extract_cleaned_json,
                    extract_metadata_text, extract_metadata_keywords, should_summarise_text)
 
@@ -297,25 +297,28 @@ def process_one_dict_item(
                 warmed.add(model)
 
             # prompt = _select_summary_prompt(augmented_one, text_field="ko_content_flat")
-            prompt_name, prompt_text = _select_summary_prompt(augmented_one, text_field="ko_content_flat")
+            # prompt_name, prompt_text = _select_summary_prompt(augmented_one, text_field="ko_content_flat")
             ko_id = augmented_one.get("_orig_id") or augmented_one.get("id") or augmented_one.get("identifier") or "unknown"
+            #
+            # m = augmented_one.get("ko_content_flat_metrics", {})
+            # tok = m.get("tokens") if isinstance(m, dict) else None
+            # noise = m.get("noise_ratio_non_alnum") if isinstance(m, dict) else None
+            # drift = m.get("first_last_block_cosine_similarity") if isinstance(m, dict) else None
+            # ent = m.get("entity_density_per_100_tokens") if isinstance(m, dict) else None
+            # rep = m.get("bigram_repetition_ratio") if isinstance(m, dict) else None
+            # flags = m.get("field_quality_flags") if isinstance(m, dict) else None
+            #
+            # logger.info(
+            #     "Summarise: id=%s model=%s prompt=%s tokens=%s noise=%s drift=%s ent_dens=%s bigram_rep=%s flags=%s",
+            #     ko_id, model, prompt_name, tok, noise, drift, ent, rep, flags
+            # )
+            #
+            # summary_en = _run_single_model(model, source_text, prompt=prompt_text)
 
-            m = augmented_one.get("ko_content_flat_metrics", {})
-            tok = m.get("tokens") if isinstance(m, dict) else None
-            noise = m.get("noise_ratio_non_alnum") if isinstance(m, dict) else None
-            drift = m.get("first_last_block_cosine_similarity") if isinstance(m, dict) else None
-            ent = m.get("entity_density_per_100_tokens") if isinstance(m, dict) else None
-            rep = m.get("bigram_repetition_ratio") if isinstance(m, dict) else None
-            flags = m.get("field_quality_flags") if isinstance(m, dict) else None
-
-            logger.info(
-                "Summarise: id=%s model=%s prompt=%s tokens=%s noise=%s drift=%s ent_dens=%s bigram_rep=%s flags=%s",
-                ko_id, model, prompt_name, tok, noise, drift, ent, rep, flags
-            )
-
+            prompt_name, prompt_text = "UNIVERSAL", UNIVERSAL_SUMMARY_PROMPT
+            logger.info("Summarise: id=%s model=%s prompt=%s", ko_id, model, prompt_name)
             summary_en = _run_single_model(model, source_text, prompt=prompt_text)
 
-            # summary_en = _run_single_model(model, source_text, prompt=prompt)
             append_model_result_dict_mode(augmented_one, out_path, summary_field, summary_en)
 
         if log_timer and t_item is not None:
