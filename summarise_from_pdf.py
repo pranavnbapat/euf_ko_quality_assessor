@@ -56,7 +56,7 @@ JsonObject = Dict[str, Any]
 
 
 # -----------------------------
-# Prompts (tune as needed)
+# Prompts
 # -----------------------------
 
 MAP_PROMPT = """

@@ -1,4 +1,4 @@
-# assess_ko_quality/domain.py
+# assess_ko_quality/quality_domain.py
 
 import os
 

@@ -15,7 +15,19 @@ _URL = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _NON_ASCII = re.compile(r"[^\x09\x0A\x0D\x20-\x7E]")
 
 # Full NLTK English stopword list (for lexical filtering)
-_STOP_EN = set(stopwords.words("english"))
+try:
+    _STOP_EN = set(stopwords.words("english"))
+except LookupError:
+    # NLTK data not present. Try to download 'stopwords' once, then retry.
+    import nltk
+
+    try:
+        nltk.download("stopwords", quiet=True)
+        _STOP_EN = set(stopwords.words("english"))
+    except Exception:
+        # Final fallback: minimal built-in list; avoid crashing pipelines
+        _STOP_EN = {"the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with"}
+
 
 
 def norm_text(s: Any) -> str:

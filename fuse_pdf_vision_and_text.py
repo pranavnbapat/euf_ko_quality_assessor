@@ -177,7 +177,10 @@ def main() -> int:
 
     # Load source KOs
     items = json.loads(input_path.read_text(encoding="utf-8"))
-    output_json_path = Path(args.output_json) if args.output_json else (out_dir / "enriched.json")
+    input_stem = input_path.stem
+    default_output_name = f"{input_stem}_extracted.json"
+    output_json_path = (out_dir / default_output_name) if not args.output_json else (
+                out_dir / Path(args.output_json).name)
 
     if not isinstance(items, list):
         raise ValueError("input-json must be a JSON array")
