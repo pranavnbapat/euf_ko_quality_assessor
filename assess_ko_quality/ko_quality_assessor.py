@@ -6,6 +6,7 @@
 # Domain     = correct agricultural terminology and context (heuristic)
 # Functional = works well for BM25, embeddings, hybrid search, RAG (proxies)
 
+import argparse
 import os
 import csv
 
@@ -19,13 +20,26 @@ from utils import _latest_json_file, ensure_directory, assert_readable_dir, _rea
 from quality_text_utils import norm_text, detect_lang_safe, _ensure_str_list
 from quality_structural import structural_scores
 from quality_semantic import semantic_scores, semantic_mnli_consistency
-from quality_domain import domain_scores, initialise_domain_centroid
+from quality_domain import domain_scores, initialise_domain_centroid, load_domain_centroid
 from quality_functional import functional_scores
 
 
 # ---------- Config: I/O ----------
 INPUT_FOLDER = Path(os.environ.get("KO_INPUT_DIR", "./input")).resolve()
 OUTPUT_FOLDER = Path(os.environ.get("KO_OUTPUT_DIR", "./output")).resolve()
+
+# ---------- Scoring weights ----------
+# All pillar scores are in 0–25. We convert to 0–100 and then apply weights.
+# Weights must sum to 100.
+WEIGHTS = {
+    "structural": int(os.environ.get("W_STRUCT", "30")),
+    "semantic": int(os.environ.get("W_SEM", "35")),
+    "functional": int(os.environ.get("W_FUNC", "25")),
+    "domain": int(os.environ.get("W_DOM", "10")),
+}
+
+if sum(WEIGHTS.values()) != 100:
+    raise ValueError(f"Invalid weights (must sum to 100): {WEIGHTS}")
 
 
 # ---------- Per-KO assessor ----------
@@ -46,7 +60,10 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
     keywords = [norm_text(x) for x in _ensure_str_list(ko.get("keywords")) if norm_text(x)]
 
     meta_text = " ".join([title, subtitle, desc])
-    lang_meta = detect_lang_safe(meta_text) if meta_text else "unknown"
+    lang_probe = (meta_text + " " + content[:500]).strip()
+    lang_meta = detect_lang_safe(lang_probe) if len(lang_probe) >= 50 else "unknown"
+
+    # lang_meta = detect_lang_safe(meta_text) if meta_text else "unknown"
 
     # Scores
     struct = structural_scores(title, subtitle, desc, content, keywords)
@@ -63,11 +80,26 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
         lang_meta=lang_meta,
     )
 
-    total_0_100 = (
-        struct["Structural_Score_0_25"]
-        + sem["Semantic_Score_0_25"]
-        + dom["Domain_Score_0_25"]
-        + func["Functional_Score_0_25"]
+    # Unweighted total (legacy): 0–100 because 4 pillars × 25
+    total_unweighted_0_100 = (
+            struct["Structural_Score_0_25"]
+            + sem["Semantic_Score_0_25"]
+            + dom["Domain_Score_0_25"]
+            + func["Functional_Score_0_25"]
+    )
+
+    # Weighted total: each pillar 0–25 -> 0–100, then weighted sum -> 0–100
+    s_struct = struct["Structural_Score_0_25"] * 4.0
+    s_sem = sem["Semantic_Score_0_25"] * 4.0
+    s_func = func["Functional_Score_0_25"] * 4.0
+    s_dom = dom["Domain_Score_0_25"] * 4.0
+
+    total_weighted_0_100 = round(
+        (WEIGHTS["structural"] * s_struct
+         + WEIGHTS["semantic"] * s_sem
+         + WEIGHTS["functional"] * s_func
+         + WEIGHTS["domain"] * s_dom) / 100.0,
+        2
     )
 
     notes: List[str] = []
@@ -99,35 +131,77 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
         **func,
 
         # Overall
-        "Total_Quality_0_100": total_0_100,
+        "Total_Quality_unweighted_0_100": total_unweighted_0_100,
+        "Total_Quality_weighted_0_100": total_weighted_0_100,
+        "Weights_used": f"S{WEIGHTS['structural']}/Se{WEIGHTS['semantic']}/F{WEIGHTS['functional']}/D{WEIGHTS['domain']}",
         "Notes": "; ".join(notes),
     }
 
-# ---------- Driver ----------
 
+def parse_args() -> argparse.Namespace:
+    """
+    CLI args:
+      --input: explicit JSON/JSONL/NDJSON(.gz) file path to score
+      --input-dir: override KO_INPUT_DIR directory scanning (default: env or ./input)
+      --output-dir: override KO_OUTPUT_DIR (default: env or ./output)
+    """
+    p = argparse.ArgumentParser(description="Assess KO quality and write TSV report.")
+    p.add_argument(
+        "--input",
+        type=str,
+        default=None,
+        help="Path to a specific input JSON/JSONL/NDJSON file (optionally .gz). "
+             "If omitted, the latest file from --input-dir is used.",
+    )
+    p.add_argument(
+        "--input-dir",
+        type=str,
+        default=str(INPUT_FOLDER),
+        help="Directory to scan for latest input file when --input is not provided.",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=str,
+        default=str(OUTPUT_FOLDER),
+        help="Directory to write the output TSV file.",
+    )
+    return p.parse_args()
+
+
+
+# ---------- Driver ----------
 def main() -> None:
     """
     Read the latest JSON/NDJSON from INPUT_FOLDER and write quality TSV to OUTPUT_FOLDER.
     """
-    assert_readable_dir(INPUT_FOLDER)
-    ensure_directory(OUTPUT_FOLDER)
+    args = parse_args()
 
-    latest = _latest_json_file(str(INPUT_FOLDER))
-    print(f"[INFO] Using latest file: {latest}")
+    input_dir = Path(args.input_dir).resolve()
+    output_dir = Path(args.output_dir).resolve()
+
+    assert_readable_dir(input_dir)
+    ensure_directory(output_dir)
+
+    if args.input:
+        latest = Path(args.input).resolve()
+        if not latest.exists():
+            raise FileNotFoundError(f"Input file not found: {latest}")
+        print(f"[INFO] Using explicit input file: {latest}")
+    else:
+        latest = _latest_json_file(str(input_dir))
+        print(f"[INFO] Using latest file: {latest}")
 
     # --- First pass: load all KOs into memory ---
     all_kos: List[Dict[str, Any]] = list(_read_json_any(latest))
     if not all_kos:
         raise RuntimeError(f"No valid JSON objects found in input file: {latest}")
 
-    # --- Build domain centroid from KO content (data-driven) ---
-    domain_texts: List[str] = []
-    for ko in all_kos:
-        content = norm_text(ko.get("ko_content_flat"))
-        if content:
-            domain_texts.append(content)
-
-    initialise_domain_centroid(domain_texts)
+    # --- Load precomputed agriculture domain centroid (anchored, stable) ---
+    centroid_path = os.environ.get(
+        "AGRI_DOMAIN_CENTROID",
+        str((Path(__file__).resolve().parent / "anchors" / "centroids" / "agri_anchor_centroid.npy"))
+    )
+    load_domain_centroid(centroid_path)
 
     # --- Second pass: actually score each KO ---
     rows: List[Dict[str, Any]] = []
@@ -144,9 +218,12 @@ def main() -> None:
                 "_orig_id": rid,
                 "title": ko.get("title", ""),
                 "lang_meta_detected": "unknown",
-                "Total_Quality_0_100": 0,
+                "Total_Quality_unweighted_0_100": 0,
+                "Total_Quality_weighted_0_100": 0,
+                "Weights_used": f"S{WEIGHTS['structural']}/Se{WEIGHTS['semantic']}/F{WEIGHTS['functional']}/D{WEIGHTS['domain']}",
                 "Notes": f"ERROR: {type(e).__name__}: {e}",
             })
+
         count += 1
         if count % 500 == 0:
             print(f"[INFO] Processed {count} KOs...")
@@ -155,7 +232,7 @@ def main() -> None:
         raise RuntimeError(f"No valid JSON objects found in input file: {latest}")
 
     df = pd.DataFrame(rows)
-    out_path = _unique_outfile(OUTPUT_FOLDER, stem="quality_check", ext=".tsv")
+    out_path = _unique_outfile(output_dir, stem="quality_check", ext=".tsv")
     df.to_csv(
         out_path,
         sep="\t",

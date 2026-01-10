@@ -12,10 +12,20 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 
+# Calibrated weights (sum to 100)
+WEIGHTS = {
+    "Structural_Score_0_25": 30,
+    "Semantic_Score_0_25": 35,
+    "Functional_Score_0_25": 25,
+    "Domain_Score_0_25": 10,
+}
+
+TOTAL_COL = "Total_Quality_weighted_0_100"
+
 # ---- Configuration container ----
 @dataclass(frozen=True)
 class Cols:
-    id_cols: tuple[str, ...] = ("_orig_id", "title", "lang_meta_detected", "Total_Quality_0_100")
+    id_cols: tuple[str, ...] = ("_orig_id", "title", "lang_meta_detected")
     pillar_cols: tuple[str, ...] = (
         "Structural_Score_0_25",
         "Semantic_Score_0_25",
@@ -67,8 +77,12 @@ def load_quality_table(path: str | Path, sheet_name: int | str = 0, sep: str = "
 
     df.columns = df.columns.str.strip()
 
-    # Coerce key numeric columns
-    numeric_cols = list(COLS.pillar_cols) + list(COLS.functional_cols) + ["Total_Quality_0_100"]
+    # Coerce key numeric columns (support both old and new total columns)
+    numeric_cols = (
+            list(COLS.pillar_cols)
+            + list(COLS.functional_cols)
+            + ["Total_Quality_unweighted_0_100", "Total_Quality_weighted_0_100"]
+    )
     for c in numeric_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -95,9 +109,12 @@ def savefig(name: str, out_dir: str | Path = "out", dpi: int = 200) -> Path:
 
 def melt_pillars(df: pd.DataFrame) -> pd.DataFrame:
     """Wide -> long for pillar scores."""
-    long_df = df[list(COLS.id_cols) + list(COLS.pillar_cols)].melt(
-        id_vars=list(COLS.id_cols),
-        value_vars=list(COLS.pillar_cols),
+    id_vars = [c for c in COLS.id_cols if c in df.columns]
+    value_vars = [c for c in COLS.pillar_cols if c in df.columns]
+
+    long_df = df[id_vars + value_vars].melt(
+        id_vars=id_vars,
+        value_vars=value_vars,
         var_name="Pillar",
         value_name="Score_0_25",
     )
@@ -107,13 +124,17 @@ def melt_pillars(df: pd.DataFrame) -> pd.DataFrame:
 
 def melt_functional(df: pd.DataFrame) -> pd.DataFrame:
     """Wide -> long for functional readiness metrics."""
-    long_df = df[list(COLS.id_cols) + list(COLS.functional_cols)].melt(
-        id_vars=list(COLS.id_cols),
-        value_vars=list(COLS.functional_cols),
+    id_vars = [c for c in COLS.id_cols if c in df.columns]
+    value_vars = [c for c in COLS.functional_cols if c in df.columns]
+
+    long_df = df[id_vars + value_vars].melt(
+        id_vars=id_vars,
+        value_vars=value_vars,
         var_name="Functional_metric",
         value_name="Score",
     )
     return long_df
+
 
 
 def pick_numeric(df: pd.DataFrame, cols: Iterable[str]) -> pd.DataFrame:

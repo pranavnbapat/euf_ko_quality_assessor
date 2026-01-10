@@ -1,18 +1,62 @@
 # assess_ko_quality/quality_domain.py
 
+import json
 import os
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 from sentence_transformers import SentenceTransformer
 
+
 AGRI_EMB_MODEL_NAME = os.environ.get("AGRI_EMB_MODEL_NAME", "all-mpnet-base-v2")
 
 # Lazy-loaded globals
 _EMB_MODEL: Optional[SentenceTransformer] = None
 _DOMAIN_CENTROID: Optional[np.ndarray] = None
+
+
+def load_domain_centroid(path: str) -> None:
+    """
+    Load a precomputed domain centroid (.npy) from disk.
+    Also verify that the centroid was built with the same embedding model
+    as AGRI_EMB_MODEL_NAME to avoid embedding-space mismatch.
+    """
+    global _DOMAIN_CENTROID
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Domain centroid file not found: {p}")
+
+    # --- Model compatibility check (strongly recommended) ---
+    meta_path = p.with_suffix(".meta.json")
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            centroid_model = (meta.get("embedding_model") or "").strip()
+            runtime_model = (AGRI_EMB_MODEL_NAME or "").strip()
+            if centroid_model and runtime_model and centroid_model != runtime_model:
+                raise ValueError(
+                    "Embedding model mismatch:\n"
+                    f"  centroid built with: {centroid_model}\n"
+                    f"  runtime AGRI_EMB_MODEL_NAME: {runtime_model}\n"
+                    "Fix: rebuild centroid with the runtime model, or set AGRI_EMB_MODEL_NAME to match."
+                )
+        except Exception as e:
+            print(f"[DOMAIN] Warning: could not validate centroid meta file {meta_path}: {e}")
+    else:
+        print(f"[DOMAIN] Warning: centroid meta file not found (expected {meta_path}). Skipping model check.")
+
+    c = np.load(p)
+
+    # Defensive normalisation
+    norm = np.linalg.norm(c)
+    if norm > 0:
+        c = c / norm
+
+    _DOMAIN_CENTROID = c
+    print(f"[DOMAIN] Loaded domain centroid from: {p}")
 
 
 def _load_emb_model() -> None:
@@ -73,8 +117,13 @@ def _cos_sim_to_agri(text: str) -> float:
         return 0.0
 
     emb = _EMB_MODEL.encode([text], normalize_embeddings=True)[0]
+
+    # keep cosine in [-1, 1]
     sim = float(np.dot(emb, _DOMAIN_CENTROID))
-    return max(0.0, min(1.0, sim))
+    # optional: map to [0,1] while preserving negatives: (sim + 1) / 2
+    sim01 = (sim + 1.0) / 2.0
+    return max(0.0, min(1.0, sim01))
+
 
 
 def _sim_to_score(sim: float) -> int:

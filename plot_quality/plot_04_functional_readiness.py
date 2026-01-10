@@ -6,8 +6,15 @@ import seaborn as sns
 from utils import load_quality_table, melt_functional, savefig, set_theme
 
 
-DATA_PATH = "data/temp_improved_quality_check_20251219_122545.tsv"
+DATA_PATH = "../assess_ko_quality/output/quality_check_20260109_201910.tsv"
 SHEET_NAME = 0
+
+order = [
+    "Functional_BM25_readiness",
+    "Functional_embedding_readiness",
+    "Functional_RAG_readiness",
+    "Functional_keyword_indexability",
+]
 
 
 def main() -> None:
@@ -16,8 +23,8 @@ def main() -> None:
     func_long = melt_functional(df)
 
     plt.figure(figsize=(14, 6))
-    ax = sns.boxplot(data=func_long, x="Functional_metric", y="Score")
-    sns.stripplot(data=func_long, x="Functional_metric", y="Score", size=3, alpha=0.4, jitter=0.25, ax=ax)
+    ax = sns.boxplot(data=func_long, x="Functional_metric", y="Score", order=order)
+    sns.stripplot(data=func_long, x="Functional_metric", y="Score", size=3, alpha=0.4, jitter=0.25, order=order, ax=ax)
     ax.set_title("Functional readiness metrics distribution")
     ax.set_xlabel("")
     ax.set_ylabel("Score")

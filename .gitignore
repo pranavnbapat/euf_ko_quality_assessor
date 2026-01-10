@@ -41,6 +41,8 @@ testing/
 *.txt
 !requirements.txt
 *.png
+*.np*
+*.rdf
 
 data_model_v2/
 florence/

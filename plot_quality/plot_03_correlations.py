@@ -3,10 +3,10 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from utils import COLS, load_quality_table, pick_numeric, savefig, set_theme
+from utils import COLS, load_quality_table, pick_numeric, savefig, set_theme, TOTAL_COL
 
 
-DATA_PATH = "data/temp_improved_quality_check_20251219_122545.tsv"
+DATA_PATH = "../assess_ko_quality/output/quality_check_20260109_202033.tsv"
 SHEET_NAME = 0
 
 
@@ -28,7 +28,8 @@ def main() -> None:
         "Functional_embedding_readiness",
         "Functional_RAG_readiness",
         "Functional_keyword_indexability",
-        "Total_Quality_0_100",
+        "Total_Quality_unweighted_0_100",
+        TOTAL_COL,
     ]
 
     # Keep only columns that actually exist (avoids crashes if your sheet differs)
@@ -38,7 +39,16 @@ def main() -> None:
     corr = sub.corr(numeric_only=True)
 
     plt.figure(figsize=(14, 10))
-    ax = sns.heatmap(corr, cmap="vlag", center=0)
+    ax = sns.heatmap(
+        corr,
+        cmap="vlag",
+        center=0,
+        vmin=-1,
+        vmax=1,
+        square=True,
+        linewidths=0.5,
+        cbar_kws={"shrink": 0.8},
+    )
     ax.set_title("Correlation heatmap (selected metrics)")
     plt.tight_layout()
     savefig("03_correlations_heatmap")
