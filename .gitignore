@@ -38,11 +38,15 @@ testing/
 *.tsv
 *.json*
 *.xls*
+*.pdf
 *.txt
 !requirements.txt
 *.png
 *.np*
 *.rdf
+
+# Ignore locked files
+*#
 
 data_model_v2/
 florence/
