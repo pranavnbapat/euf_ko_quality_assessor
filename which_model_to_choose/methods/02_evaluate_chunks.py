@@ -29,25 +29,30 @@ def load_json(path: Path):
 
 def extract_chunks(obj):
     """
-    We expect something like:
-    {
-        "ko_content_flat": "... big text ...",
-        "ko_content_flat_cleaned": "...",
-        "ko_content_flat_s1": "..."
-    }
-    or a list of such dicts.
-    We will return a list of (label, text).
+    Keep only:
+      - ko_content_flat
+      - ko_content_flat_summarised
+    Works for a dict JSON or a list of dicts.
+    Returns a list of (label, text).
     """
+    allowed = {"ko_content_flat", "ko_content_flat_summarised"}
+
+    def keep(k, v):
+        # Only keep allowed keys and only string values
+        return (k in allowed) and isinstance(v, str)
+
     if isinstance(obj, dict):
-        return [(k, v) for k, v in obj.items() if k.startswith("ko_content_flat")]
+        return [(k, v) for k, v in obj.items() if keep(k, v)]
+
     elif isinstance(obj, list):
         collected = []
         for i, item in enumerate(obj):
             if isinstance(item, dict):
                 for k, v in item.items():
-                    if k.startswith("ko_content_flat"):
+                    if keep(k, v):
                         collected.append((f"item{i}.{k}", v))
         return collected
+
     else:
         raise ValueError("Unsupported JSON structure for chunks")
 
