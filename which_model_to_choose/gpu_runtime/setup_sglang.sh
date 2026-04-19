@@ -29,6 +29,9 @@ fi
 
 source .venv/bin/activate
 pip install --upgrade pip
+if [[ -f requirements.txt ]]; then
+  pip install -r requirements.txt
+fi
 pip install sglang openai requests python-dotenv pyyaml tqdm huggingface-hub hf_transfer
 
 mkdir -p /workspace/models
@@ -43,4 +46,8 @@ echo "Next steps:"
 echo "1. Put HF_TOKEN and SGLANG_BASE_URL in which_model_to_choose/gpu_runtime/.env"
 echo "2. Generate a GPU-fit config:"
 echo "   python which_model_to_choose/gpu_runtime/build_sglang_model_config.py a40"
-echo "3. Start SGLang separately for the chosen model(s)"
+echo "3. Optionally predownload the configured models:"
+echo "   bash which_model_to_choose/gpu_runtime/download_runtime_models.sh"
+echo "4. Start SGLang for a chosen model key, or run the full model cycle:"
+echo "   python which_model_to_choose/gpu_runtime/start_sglang_server.py --model-key <model_key>"
+echo "   bash which_model_to_choose/gpu_runtime/run_model_cycle.sh --task summary --sample-size 50"

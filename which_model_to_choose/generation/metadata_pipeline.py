@@ -50,9 +50,9 @@ def _build_prompt(record: Dict[str, Any], summary_text: str) -> str:
     )
 
 
-def _run_once(model_key: str, prompt: str, max_tokens: int) -> Dict[str, Any]:
+def _run_once(served_model_name: str, prompt: str, max_tokens: int) -> Dict[str, Any]:
     response = chat_completion(
-        model=model_key,
+        model=served_model_name,
         messages=[
             {"role": "system", "content": "Return strict JSON only."},
             {"role": "user", "content": prompt},
@@ -65,13 +65,13 @@ def _run_once(model_key: str, prompt: str, max_tokens: int) -> Dict[str, Any]:
     return clamp_metadata_lengths(obj)
 
 
-def generate_metadata_for_record(model_key: str, record: Dict[str, Any], summary_text: str) -> Dict[str, Any]:
+def generate_metadata_for_record(served_model_name: str, record: Dict[str, Any], summary_text: str) -> Dict[str, Any]:
     prompt = _build_prompt(record, summary_text)
     last_err: Exception | None = None
     for attempt in range(1, METADATA_MAX_ATTEMPTS + 1):
         try:
             max_tokens = LONG_NUM_PREDICT if len(summary_text) > 12000 else DEFAULT_NUM_PREDICT
-            return _run_once(model_key, prompt, max_tokens)
+            return _run_once(served_model_name, prompt, max_tokens)
         except Exception as e:
             last_err = e
             if attempt >= METADATA_MAX_ATTEMPTS:
@@ -82,16 +82,26 @@ def generate_metadata_for_record(model_key: str, record: Dict[str, Any], summary
     raise RuntimeError("Model returned no usable metadata")
 
 
-def generate_metadata_dataset(data: Any, model_key: str, summary_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def generate_metadata_dataset(
+    data: Any,
+    model_key: str,
+    served_model_name: str,
+    summary_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     records = list(iter_records(data))
     summary_by_id = {
         row.get("id"): row
         for row in summary_rows
         if row.get("status") == "ok" and isinstance(row.get("summary"), str)
     }
+    filtered_records: List[Dict[str, Any]] = []
+    for idx, record in enumerate(records, 1):
+        rec_id = record.get("_orig_id") or record.get("@id") or record.get("id") or f"row_{idx}"
+        if rec_id in summary_by_id:
+            filtered_records.append(record)
 
     rows: List[Dict[str, Any]] = []
-    for idx, record in enumerate(records, 1):
+    for idx, record in enumerate(filtered_records, 1):
         rec_id = record.get("_orig_id") or record.get("@id") or record.get("id") or f"row_{idx}"
         row: Dict[str, Any] = {
             "record_index": idx,
@@ -100,14 +110,8 @@ def generate_metadata_dataset(data: Any, model_key: str, summary_rows: List[Dict
         }
 
         summary_row = summary_by_id.get(rec_id)
-        if not summary_row:
-            row["status"] = "error"
-            row["error"] = "No successful summary found for record"
-            rows.append(row)
-            continue
-
         try:
-            md = generate_metadata_for_record(model_key, record, summary_row["summary"])
+            md = generate_metadata_for_record(served_model_name, record, summary_row["summary"])
             row.update(md)
             row["status"] = "ok"
         except Exception as e:

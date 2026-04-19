@@ -11,10 +11,11 @@ generation_profile:
   target_max_output_tokens: 512
   seq_lens: "4096,8192,16384"
   allow_fits: "comfortable"
-  generated_at: "2026-04-19 22:04:14"
+  generated_at: "2026-04-19 22:07:12"
 models:
   deepseek_r1_distill_qwen_14b_fp16_a40:
     name: "deepseek-r1-distill-qwen-14b-a40"
+    served_model_name: "deepseek-r1-distill-qwen-14b-a40"
     repo: "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
     local_path: "/workspace/models/deepseek_r1_distill_qwen_14b_fp16_a40"
     quant: null
@@ -25,6 +26,7 @@ models:
 
   deepseek_r1_distill_qwen_7b_fp16_a40:
     name: "deepseek-r1-distill-qwen-7b-a40"
+    served_model_name: "deepseek-r1-distill-qwen-7b-a40"
     repo: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
     local_path: "/workspace/models/deepseek_r1_distill_qwen_7b_fp16_a40"
     quant: null
@@ -35,6 +37,7 @@ models:
 
   devstral_small_2_24b_instruct_2512_fp16_a40:
     name: "devstral-small-2-24b-instruct-2512-a40"
+    served_model_name: "devstral-small-2-24b-instruct-2512-a40"
     repo: "mistralai/Devstral-Small-2-24B-Instruct-2512"
     local_path: "/workspace/models/devstral_small_2_24b_instruct_2512_fp16_a40"
     quant: null
@@ -45,6 +48,7 @@ models:
 
   eurollm_9b_instruct_2512_fp16_a40:
     name: "eurollm-9b-instruct-2512-a40"
+    served_model_name: "eurollm-9b-instruct-2512-a40"
     repo: "utter-project/EuroLLM-9B-Instruct-2512"
     local_path: "/workspace/models/eurollm_9b_instruct_2512_fp16_a40"
     quant: null
@@ -55,6 +59,7 @@ models:
 
   mistral_nemo_instruct_2407_awq_fp16_a40:
     name: "mistral-nemo-instruct-2407-awq-a40"
+    served_model_name: "mistral-nemo-instruct-2407-awq-a40"
     repo: "akhbar/Mistral-Nemo-Instruct-2407.AWQ"
     local_path: "/workspace/models/mistral_nemo_instruct_2407_awq_fp16_a40"
     quant: null
@@ -65,6 +70,7 @@ models:
 
   mistral_nemo_instruct_2407_fp16_a40:
     name: "mistral-nemo-instruct-2407-a40"
+    served_model_name: "mistral-nemo-instruct-2407-a40"
     repo: "mistralai/Mistral-Nemo-Instruct-2407"
     local_path: "/workspace/models/mistral_nemo_instruct_2407_fp16_a40"
     quant: null
@@ -75,6 +81,7 @@ models:
 
   mistral_small_24b_instruct_2501_awq_fp16_a40:
     name: "mistral-small-24b-instruct-2501-awq-a40"
+    served_model_name: "mistral-small-24b-instruct-2501-awq-a40"
     repo: "stelterlab/Mistral-Small-24B-Instruct-2501-AWQ"
     local_path: "/workspace/models/mistral_small_24b_instruct_2501_awq_fp16_a40"
     quant: null
@@ -85,6 +92,7 @@ models:
 
   mistral_small_3_2_24b_instruct_2506_awq_sym_fp16_a40:
     name: "mistral-small-3-2-24b-instruct-2506-awq-sym-a40"
+    served_model_name: "mistral-small-3-2-24b-instruct-2506-awq-sym-a40"
     repo: "jeffcookio/Mistral-Small-3.2-24B-Instruct-2506-awq-sym"
     local_path: "/workspace/models/mistral_small_3_2_24b_instruct_2506_awq_sym_fp16_a40"
     quant: null
@@ -95,6 +103,7 @@ models:
 
   qwen3_30b_a3b_instruct_2507_awq_fp16_a40:
     name: "qwen3-30b-a3b-instruct-2507-awq-a40"
+    served_model_name: "qwen3-30b-a3b-instruct-2507-awq-a40"
     repo: "stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ"
     local_path: "/workspace/models/qwen3_30b_a3b_instruct_2507_awq_fp16_a40"
     quant: null
@@ -105,6 +114,7 @@ models:
 
   qwen3_5_9b_fp16_a40:
     name: "qwen3-5-9b-a40"
+    served_model_name: "qwen3-5-9b-a40"
     repo: "Qwen/Qwen3.5-9B"
     local_path: "/workspace/models/qwen3_5_9b_fp16_a40"
     quant: null
@@ -115,6 +125,7 @@ models:
 
   qwen3_6_35b_a3b_fp16_a40:
     name: "qwen3-6-35b-a3b-a40"
+    served_model_name: "qwen3-6-35b-a3b-a40"
     repo: "Qwen/Qwen3.6-35B-A3B"
     local_path: "/workspace/models/qwen3_6_35b_a3b_fp16_a40"
     quant: null
@@ -125,6 +136,7 @@ models:
 
   qwen3_6_35b_a3b_fp8_fp16_a40:
     name: "qwen3-6-35b-a3b-fp8-a40"
+    served_model_name: "qwen3-6-35b-a3b-fp8-a40"
     repo: "Qwen/Qwen3.6-35B-A3B-FP8"
     local_path: "/workspace/models/qwen3_6_35b_a3b_fp8_fp16_a40"
     quant: null
@@ -135,6 +147,7 @@ models:
 
   teuken_7b_instruct_commercial_v0_4_fp16_a40:
     name: "teuken-7b-instruct-commercial-v0-4-a40"
+    served_model_name: "teuken-7b-instruct-commercial-v0-4-a40"
     repo: "openGPT-X/Teuken-7B-instruct-commercial-v0.4"
     local_path: "/workspace/models/teuken_7b_instruct_commercial_v0_4_fp16_a40"
     quant: null

@@ -43,9 +43,9 @@ def _messages(prompt: str, content: str) -> List[Dict[str, str]]:
     ]
 
 
-def _run_once(model_key: str, prompt: str, content: str, max_tokens: int) -> str:
+def _run_once(served_model_name: str, prompt: str, content: str, max_tokens: int) -> str:
     response = chat_completion(
-        model=model_key,
+        model=served_model_name,
         messages=_messages(prompt, content),
         max_tokens=max_tokens,
         temperature=0.2,
@@ -58,7 +58,7 @@ def _run_once(model_key: str, prompt: str, content: str, max_tokens: int) -> str
     return summary
 
 
-def generate_summary_for_text(model_key: str, content: str) -> str:
+def generate_summary_for_text(served_model_name: str, content: str) -> str:
     tok = approx_token_count(content)
     last_err: Exception | None = None
 
@@ -68,14 +68,14 @@ def generate_summary_for_text(model_key: str, content: str) -> str:
                 chunks = split_into_tokenish_chunks(content, CHUNK_TARGET_TOK, CHUNK_OVERLAP_TOK)
                 partials: List[str] = []
                 for ch in chunks:
-                    partials.append(_run_once(model_key, DEFAULT_SUMMARY_PROMPT, ch, DEFAULT_NUM_PREDICT))
+                    partials.append(_run_once(served_model_name, DEFAULT_SUMMARY_PROMPT, ch, DEFAULT_NUM_PREDICT))
                 combined_input = "\n\n---- PARTIAL SUMMARY ----\n".join(partials)
-                return _run_once(model_key, COMBINE_SUMMARY_PROMPT, combined_input, COMBINE_NUM_PREDICT)
+                return _run_once(served_model_name, COMBINE_SUMMARY_PROMPT, combined_input, COMBINE_NUM_PREDICT)
 
             if tok > NEAR_LIMIT_CTX_THRESHOLD_TOK:
-                return _run_once(model_key, DEFAULT_SUMMARY_PROMPT, content, LONG_NUM_PREDICT)
+                return _run_once(served_model_name, DEFAULT_SUMMARY_PROMPT, content, LONG_NUM_PREDICT)
 
-            return _run_once(model_key, DEFAULT_SUMMARY_PROMPT, content, DEFAULT_NUM_PREDICT)
+            return _run_once(served_model_name, DEFAULT_SUMMARY_PROMPT, content, DEFAULT_NUM_PREDICT)
         except Exception as e:
             last_err = e
             if attempt >= SUMMARY_MAX_ATTEMPTS:
@@ -87,7 +87,7 @@ def generate_summary_for_text(model_key: str, content: str) -> str:
     raise RuntimeError("Model returned no usable summary")
 
 
-def summarize_dataset(data: Any, model_key: str) -> List[Dict[str, Any]]:
+def summarize_dataset(data: Any, model_key: str, served_model_name: str) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for idx, record in enumerate(iter_records(data), 1):
         rec_id = record.get("_orig_id") or record.get("@id") or record.get("id") or f"row_{idx}"
@@ -107,7 +107,7 @@ def summarize_dataset(data: Any, model_key: str) -> List[Dict[str, Any]]:
             continue
 
         try:
-            row["summary"] = generate_summary_for_text(model_key, content)
+            row["summary"] = generate_summary_for_text(served_model_name, content)
             row["status"] = "ok"
         except Exception as e:
             row["status"] = "error"

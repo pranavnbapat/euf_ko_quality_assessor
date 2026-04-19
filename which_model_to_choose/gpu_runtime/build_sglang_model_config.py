@@ -118,6 +118,29 @@ def fetch_checkpoint_total_size_mb(repo_id: str, hf_token: Optional[str] = None)
     return None
 
 
+FIT_ORDER = {
+    "comfortable": 0,
+    "tight": 1,
+    "very tight": 2,
+    "unlikely": 3,
+}
+
+
+def best_candidate_summary(
+    candidates: List[Tuple[int, int, float, float, str]],
+) -> Optional[Tuple[int, int, str]]:
+    if not candidates:
+        return None
+    best = min(
+        candidates,
+        key=lambda x: (
+            FIT_ORDER.get(x[4], 99),
+            -x[0],
+        ),
+    )
+    return best[0], best[1], best[4]
+
+
 def choose_len_by_fit(
     weights_mb: float,
     hidden_size: int,
@@ -131,7 +154,7 @@ def choose_len_by_fit(
     target_max_output_tokens: int,
     target_vram_gb: int,
     allow_fits: List[str],
-) -> Optional[Tuple[int, int, float, float, str]]:
+) -> Tuple[Optional[Tuple[int, int, float, float, str]], List[Tuple[int, int, float, float, str]]]:
     candidates: List[Tuple[int, int, float, float, str]] = []
     vram_mb = target_vram_gb * 1024
     candidate_lens = sorted(set(seq_lens))
@@ -167,8 +190,8 @@ def choose_len_by_fit(
 
     allowed = [c for c in candidates if c[4] in allow_fits]
     if not allowed:
-        return None
-    return max(allowed, key=lambda x: x[0])
+        return None, candidates
+    return max(allowed, key=lambda x: x[0]), candidates
 
 
 def estimate_seq_cap_for_concurrency(
@@ -215,6 +238,7 @@ def render_models_yaml(models: List[Dict[str, str]]) -> str:
     for m in models:
         lines.append(f"  {m['key']}:")
         lines.append(f"    name: \"{m['name']}\"")
+        lines.append(f"    served_model_name: \"{m['served_model_name']}\"")
         lines.append(f"    repo: \"{m['repo']}\"")
         lines.append(f"    local_path: \"{m['local_path']}\"")
         lines.append("    quant: null")
@@ -454,7 +478,7 @@ def main() -> int:
             )
             continue
 
-        chosen = choose_len_by_fit(
+        chosen, candidates = choose_len_by_fit(
             weights_mb=weights_mb,
             hidden_size=hidden_size,
             num_layers=num_layers,
@@ -469,14 +493,25 @@ def main() -> int:
             allow_fits=allow_fits,
         )
         if chosen is None:
+            best_candidate = best_candidate_summary(candidates)
+            if best_candidate is None:
+                reason = (
+                    "no valid candidate seq_len remained after applying model/context/concurrency "
+                    f"constraints (target_max_output_tokens={effective_max_output_tokens})"
+                )
+            else:
+                best_seq_len, best_usable_input_tokens, best_fit = best_candidate
+                reason = (
+                    "no candidate seq_len matched requested fit labels "
+                    f"[{','.join(allow_fits)}]; "
+                    f"best observed fit={best_fit} at seq_len={best_seq_len} "
+                    f"(usable_input_tokens={best_usable_input_tokens}, "
+                    f"target_max_output_tokens={effective_max_output_tokens})"
+                )
             skipped.append(
                 (
                     repo,
-                    (
-                        f"no seq_len in allowed fits with usable_input_tokens>0 "
-                        f"(target_max_output_tokens={effective_max_output_tokens}): "
-                        f"{','.join(allow_fits)}"
-                    ),
+                    reason,
                 )
             )
             continue
@@ -488,6 +523,7 @@ def main() -> int:
             {
                 "key": top_key,
                 "name": build_name(repo, target_gpu),
+                "served_model_name": build_name(repo, target_gpu),
                 "repo": repo,
                 "local_path": f"/workspace/models/{top_key}",
                 "dtype": dtype,

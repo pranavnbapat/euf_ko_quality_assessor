@@ -19,6 +19,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parents[1]
 RUNTIME_DIR = PROJECT_ROOT / "which_model_to_choose" / "gpu_runtime"
 ARTIFACTS_DIR = PROJECT_ROOT / "which_model_to_choose" / "artifacts"
+OUTPUT_DIR = PROJECT_ROOT / "which_model_to_choose" / "output"
 CANDIDATE_RUNS_DIR = ARTIFACTS_DIR / "candidate_runs"
 EVALUATION_RESULTS_DIR = ARTIFACTS_DIR / "evaluation_results"
 INPUT_DIR = PROJECT_ROOT / "input"
