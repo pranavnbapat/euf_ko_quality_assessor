@@ -32,11 +32,22 @@ def now_utc_iso() -> str:
 # ----------------------------
 
 def ensure_list(data: Any) -> List[Dict[str, Any]]:
+    """
+    Extract list of KO objects from JSON data.
+    Handles:
+    - Old format: direct list of KOs
+    - New format: {meta, stats, docs: [...]} where docs contains KOs
+    - Single object: wrap in list
+    """
     if isinstance(data, list):
         return [x for x in data if isinstance(x, dict)]
     if isinstance(data, dict):
+        # New format: check for 'docs' field containing the KOs
+        if "docs" in data and isinstance(data["docs"], list):
+            return [x for x in data["docs"] if isinstance(x, dict)]
+        # Single object (legacy single KO format)
         return [data]
-    raise ValueError("Input JSON must be a list or an object")
+    raise ValueError("Input JSON must be a list, an object, or an object with 'docs' field")
 
 
 # ----------------------------
@@ -525,9 +536,11 @@ def main():
     with open(inp, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    items = ensure_list(data)
-
+    # Check if input is wrapped format (has docs field)
+    is_wrapped_format = isinstance(data, dict) and "docs" in data and isinstance(data["docs"], list)
     is_input_list = isinstance(data, list)
+
+    items = ensure_list(data)
 
     total = len(items)
 
@@ -570,7 +583,6 @@ def main():
             "ttr": qr.metrics.get("ttr"),
             "unigram_entropy": qr.metrics.get("unigram_entropy"),
             "bigram_repetition_ratio": qr.metrics.get("bigram_repetition_ratio"),
-            # "entity_count": qr.metrics.get("entity_count"),
             "entity_unique": qr.metrics.get("entity_unique"),
             "entity_mentions": qr.metrics.get("entity_mentions"),
             "entity_density_per_100_tokens": qr.metrics.get("entity_density_per_100_tokens"),
@@ -600,13 +612,32 @@ def main():
 
     print(f"[{now_utc_iso()}] Wrote TSV: {tsv_path}")
 
+    # Write flags summary TSV
+    flags_path = tsv_path.with_name(tsv_path.stem + "_flags.tsv")
+    flags_rows = []
+    for r in rows:
+        if r["flags"]:
+            for fl in r["flags"].split(";"):
+                if fl:
+                    flags_rows.append({"id": r["id"], "title": r["title"], "field": r["field"], "flag": fl})
+    if flags_rows:
+        df_flags = pd.DataFrame(flags_rows)
+        df_flags.to_csv(flags_path, sep="\t", index=False, encoding="utf-8")
+        print(f"[{now_utc_iso()}] Wrote flags TSV: {flags_path} ({len(flags_rows)} flag entries)")
+
     if args.out_json:
         out_json_path = Path(args.out_json)
     else:
         out_json_path = out_dir / f"{inp.stem}_with_{args.field}_metrics.json"
 
-    # Write augmented JSON
-    out_payload = items if is_input_list else (items[0] if items else {})
+    # Write augmented JSON - preserve original structure
+    if is_wrapped_format:
+        # For wrapped format, update the docs in place and write the whole wrapper
+        out_payload = data
+    elif is_input_list:
+        out_payload = items
+    else:
+        out_payload = items[0] if items else {}
 
     with open(out_json_path, "w", encoding="utf-8") as f:
         json.dump(out_payload, f, ensure_ascii=False, indent=2)

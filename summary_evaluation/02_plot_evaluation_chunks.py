@@ -1,4 +1,5 @@
 import json
+import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -6,7 +7,8 @@ import pandas as pd
 
 
 # ---------- CONFIG ----------
-RESULTS_JSON_PATH = Path("02_evaluate_chunks.json")
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_RESULTS_JSON_PATH = SCRIPT_DIR / "output" / "02_evaluate_chunks.json"
 
 
 def load_results(path: Path) -> pd.DataFrame:
@@ -108,8 +110,15 @@ def plot_compression_vs_scores(df: pd.DataFrame) -> None:
     plt.show()
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description="Plot semantic similarity evaluation outputs.")
+    p.add_argument("--input", type=Path, default=DEFAULT_RESULTS_JSON_PATH, help="Path to 02 evaluation JSON.")
+    return p.parse_args()
+
+
 def main() -> None:
-    df = load_results(RESULTS_JSON_PATH)
+    args = parse_args()
+    df = load_results(args.input)
 
     # ---- Quick numeric insights in the terminal ----
     print("\n=== Mean metrics per model ===")

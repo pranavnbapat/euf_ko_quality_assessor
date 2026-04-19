@@ -1,10 +1,11 @@
 import json
+import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 
 
 # ---------- CONFIG ----------
-RESULTS_JSON_PATH = "03_evaluate_chunks.json"
+DEFAULT_RESULTS_JSON_PATH = str(Path(__file__).resolve().parent / "output" / "03_evaluate_chunks.json")
 
 
 def load_results(path: str) -> pd.DataFrame:
@@ -85,8 +86,15 @@ def plot_contradiction_by_model(df: pd.DataFrame) -> None:
     plt.show()
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description="Plot NLI evaluation outputs.")
+    p.add_argument("--input", default=DEFAULT_RESULTS_JSON_PATH, help="Path to 03 evaluation JSON.")
+    return p.parse_args()
+
+
 def main():
-    df = load_results(RESULTS_JSON_PATH)
+    args = parse_args()
+    df = load_results(args.input)
 
     # quick sanity check: show basic stats per model in the terminal
     print("\n=== Mean metrics per model ===")

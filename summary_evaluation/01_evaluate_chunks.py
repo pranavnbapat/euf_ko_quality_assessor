@@ -5,11 +5,13 @@ Evaluate selected text fields for Knowledge Objects (KOs) using lightweight, int
 
 What this script does
 - Loads a JSON file containing one or more KO-like records (dicts).
-- For each record, selects a single value for each field:
-  - title/subtitle/description: prefer *_llm if present and non-empty, else original
-  - keywords: prefer keywords_llm if present (string or list), else keywords
-  - ko_content_flat: prefer ko_content_flat_summarised if present, else ko_content_flat
-- Computes the same set of intrinsic “sanity” metrics for each selected text block:
+- For each record, scores both original and generated variants side by side:
+  - title / title_llm
+  - subtitle / subtitle_llm
+  - description / description_llm
+  - keywords / keywords_llm
+  - ko_content_flat / ko_content_flat_summarised
+- Computes the same set of intrinsic “sanity” metrics for each text block:
   - length (chars, tokens)
   - lexical diversity (type-token ratio)
   - English stopword ratio (English-only heuristic)
@@ -26,13 +28,17 @@ What it does NOT do
 
 Intended use
 - Flag empty/junky/PDF-noisy text, unusually repetitive outputs, and likely non-English content.
-- Provide comparable signals to decide which text variant is safest to index and use downstream.
+- Compare original vs generated variants directly, field by field.
 """
 
+import argparse
 import json
 import re
 from collections import Counter
+from pathlib import Path
+from glob import glob
 import nltk
+import pandas as pd
 
 from nltk.corpus import stopwords
 
@@ -46,7 +52,10 @@ except LookupError:
     nltk.download("stopwords", quiet=True)
     STOPWORDS = set(stopwords.words("english"))
 
-JSON_PATH = "input/final_output_02_01-2026_23-13-59_summary_20260106_143343_metadata_20260107_062641.json"
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+DEFAULT_OUTPUT = SCRIPT_DIR / "output" / "01_evaluate_selected.json"
+ROOT_INPUT_DIR = REPO_ROOT / "input"
 
 # Tokenisation strategy:
 # - normalise_for_tokens() first replaces high-noise patterns (URLs/emails/long numbers)
@@ -279,107 +288,48 @@ def rouge_n(candidate: str, reference: str, n=1):
 
 # ===== 4. MAIN EVALUATION LOGIC =====
 
-def load_json(path: str):
-    """Load JSON that could be a dict or a list with one dict."""
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    # if isinstance(data, list) and data:
-    #     return data[0]
-    return data
+def latest_input_file(folder: Path = ROOT_INPUT_DIR) -> Path:
+    candidates = [Path(p) for p in glob(str(folder / "*")) if Path(p).is_file()]
+    if not candidates:
+        raise FileNotFoundError(f"No files found in {folder}/")
+    candidates.sort(key=lambda p: (p.stat().st_mtime, str(p)))
+    return candidates[-1]
 
 
-def build_meta_fields(obj: dict) -> dict:
-    """
-    Build metadata using LLM fields if present, else fall back to originals.
-    Also logs which source key was used for each field.
-    """
-    title, title_src = pick_field(obj, "title", "title_llm")
-    subtitle, subtitle_src = pick_field(obj, "subtitle", "subtitle_llm")
-    description, description_src = pick_field(obj, "description", "description_llm")
-    keywords_text, keywords_src = pick_keywords(obj)
+def load_json(path: Path):
+    """Load records from JSON array/object, wrapped {docs:[...]}, or JSONL."""
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
 
-    meta_all = " ".join([title, subtitle, description, keywords_text]).strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            docs = data.get("docs")
+            if isinstance(docs, list):
+                return docs
+            return [data]
+    except json.JSONDecodeError:
+        pass
 
-    return {
-        "meta_title": title,
-        "meta_subtitle": subtitle,
-        "meta_description": description,
-        "meta_keywords": keywords_text,
-        "meta_all": meta_all,
-
-        # provenance / logging
-        "meta_title_source": title_src,
-        "meta_subtitle_source": subtitle_src,
-        "meta_description_source": description_src,
-        "meta_keywords_source": keywords_src,
-    }
-
-
-def pick_field(obj: dict, base_key: str, llm_key: str = None):
-    """
-    Prefer llm_key if present and non-empty; else prefer base_key if non-empty.
-    Returns: (value_as_str, used_key_name)
-    """
-    llm_key = llm_key or f"{base_key}_llm"
-
-    def _norm(v):
-        if v is None:
-            return ""
-        if isinstance(v, list):
-            # keywords_llm sometimes is list; normalise into one string
-            v = " ".join(str(x) for x in v if x is not None)
-        return str(v).strip()
-
-    v_llm = _norm(obj.get(llm_key))
-    if v_llm:
-        return v_llm, llm_key
-
-    v_base = _norm(obj.get(base_key))
-    if v_base:
-        return v_base, base_key
-
-    return "", "missing"
+    rows = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
 
 
-def pick_keywords(obj: dict):
-    """
-    Prefer keywords_llm (string or list) if present, else keywords (list or string).
-    Returns: (keywords_text, used_key_name)
-    """
-    # First try keywords_llm (may be list or string)
-    v, used = pick_field(obj, "keywords", "keywords_llm")
-    if v:
-        return v, used
-
-    # Fallback: original keywords list -> string
-    kw = obj.get("keywords") or []
-    if isinstance(kw, list):
-        kw_text = " ".join(str(x) for x in kw if x)
-    else:
-        kw_text = str(kw).strip()
-
-    return kw_text, ("keywords" if kw_text else "missing")
-
-
-def pick_content(obj: dict):
-    """
-    Prefer ko_content_flat_summarised if present; else ko_content_flat.
-    Returns: (content_text, used_key_name)
-    """
-    return pick_field(obj, "ko_content_flat", "ko_content_flat_summarised")
-
-
-def find_selected_fields(obj: dict):
-    """
-    Select a single 'final' value for each field:
-      - title/subtitle/description/keywords: prefer *_llm if present
-      - content: prefer ko_content_flat_summarised if present
-    """
-    meta = build_meta_fields(obj)
-    content_text, content_src = pick_content(obj)
-
-    return content_text, meta, content_src
+def normalise_field_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return " ".join(str(x) for x in value if x is not None).strip()
+    return str(value).strip()
 
 
 def score_text_block(prefix: str, text: str) -> dict:
@@ -416,40 +366,43 @@ def score_text_block(prefix: str, text: str) -> dict:
 
 def evaluate_record(record_idx: int, obj: dict) -> dict:
     """
-    For each KO record:
-    - select best-available text per field (LLM if present else original)
-    - compute a separate metrics block per field
+    For each KO record, score original and generated variants side by side.
     """
-    # Select sources
-    content_text, content_src = pick_content(obj)
-
-    title_text, title_src = pick_field(obj, "title", "title_llm")
-    subtitle_text, subtitle_src = pick_field(obj, "subtitle", "subtitle_llm")
-    desc_text, desc_src = pick_field(obj, "description", "description_llm")
-    kw_text, kw_src = pick_keywords(obj)
-
-    # Base output row with provenance
     out = {
         "record_index": str(record_idx),
-        "content_source": content_src,
-        "title_source": title_src,
-        "subtitle_source": subtitle_src,
-        "description_source": desc_src,
-        "keywords_source": kw_src,
     }
 
-    # 5 independent score blocks (same methodology)
-    out.update(score_text_block("content", content_text))
-    out.update(score_text_block("title", title_text))
-    out.update(score_text_block("subtitle", subtitle_text))
-    out.update(score_text_block("description", desc_text))
-    out.update(score_text_block("keywords", kw_text))
+    field_map = {
+        "title": "title",
+        "title_llm": "title_llm",
+        "subtitle": "subtitle",
+        "subtitle_llm": "subtitle_llm",
+        "description": "description",
+        "description_llm": "description_llm",
+        "keywords": "keywords",
+        "keywords_llm": "keywords_llm",
+        "ko_content_flat": "ko_content_flat",
+        "ko_content_flat_summarised": "ko_content_flat_summarised",
+    }
+
+    for prefix, source_key in field_map.items():
+        out[f"{prefix}_source"] = source_key if normalise_field_value(obj.get(source_key)) else "missing"
+        out.update(score_text_block(prefix, normalise_field_value(obj.get(source_key))))
 
     return out
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description="Intrinsic evaluation of selected KO text fields.")
+    p.add_argument("--input", type=Path, help="Input JSON path. Defaults to newest file under input/")
+    p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output JSON path.")
+    return p.parse_args()
+
+
 def main():
-    data = load_json(JSON_PATH)
+    args = parse_args()
+    input_path = args.input or latest_input_file()
+    data = load_json(input_path)
 
     if isinstance(data, dict):
         data = [data]
@@ -465,36 +418,49 @@ def main():
             metrics = evaluate_record(idx, obj)
             all_results.append(metrics)
 
-        # sort across all records
-        all_results.sort(key=lambda x: x.get("content_len_tokens", 0), reverse=True)
+        # sort across all records by summarised content length, then raw content length
+        all_results.sort(
+            key=lambda x: (
+                x.get("ko_content_flat_summarised_len_tokens", 0),
+                x.get("ko_content_flat_len_tokens", 0),
+            ),
+            reverse=True,
+        )
 
-        with open("01_evaluate_selected.json", "w", encoding="utf-8") as f:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with args.output.open("w", encoding="utf-8") as f:
             json.dump(all_results, f, ensure_ascii=False, indent=2)
+        xlsx_path = args.output.with_suffix(".xlsx")
+        pd.DataFrame(all_results).to_excel(xlsx_path, index=False)
 
         # ===== aggregated / overall view =====
-        per_source = {}
-        for m in all_results:
-            src = m.get("content_source", "unknown")
-            entry = per_source.setdefault(src, {
-                "count": 0,
-                "sum_content_tokens": 0.0,
-                "sum_title_tokens": 0.0,
-                "sum_desc_tokens": 0.0,
-            })
-            entry["count"] += 1
-            entry["sum_content_tokens"] += m.get("content_len_tokens", 0)
-            entry["sum_title_tokens"] += m.get("title_len_tokens", 0)
-            entry["sum_desc_tokens"] += m.get("description_len_tokens", 0)
+        compare_fields = [
+            ("title", "title_llm"),
+            ("subtitle", "subtitle_llm"),
+            ("description", "description_llm"),
+            ("keywords", "keywords_llm"),
+            ("ko_content_flat", "ko_content_flat_summarised"),
+        ]
 
-        print("\n=== Aggregated summary by content_source ===")
-        for src, stats in per_source.items():
-            c = stats["count"]
+        print("\n=== Aggregated comparison summary ===")
+        for original_field, derived_field in compare_fields:
+            orig_present = sum(1 for row in all_results if row.get(f"{original_field}_len_tokens", 0) > 0)
+            deriv_present = sum(1 for row in all_results if row.get(f"{derived_field}_len_tokens", 0) > 0)
+
+            orig_tokens = [row.get(f"{original_field}_len_tokens", 0) for row in all_results if row.get(f"{original_field}_len_tokens", 0) > 0]
+            deriv_tokens = [row.get(f"{derived_field}_len_tokens", 0) for row in all_results if row.get(f"{derived_field}_len_tokens", 0) > 0]
+
+            avg_orig = (sum(orig_tokens) / len(orig_tokens)) if orig_tokens else 0.0
+            avg_deriv = (sum(deriv_tokens) / len(deriv_tokens)) if deriv_tokens else 0.0
+
             print(
-                f"- {src}: {c} items | "
-                f"avg content tokens={stats['sum_content_tokens'] / c:.1f} | "
-                f"avg title tokens={stats['sum_title_tokens'] / c:.1f} | "
-                f"avg desc tokens={stats['sum_desc_tokens'] / c:.1f}"
+                f"- {original_field} vs {derived_field}: "
+                f"present={orig_present}/{len(all_results)} vs {deriv_present}/{len(all_results)} | "
+                f"avg_tokens={avg_orig:.1f} vs {avg_deriv:.1f}"
             )
+
+        print(f"\nWrote JSON: {args.output}")
+        print(f"Wrote Excel: {xlsx_path}")
 
             # # Pretty print
             # for m in all_results:

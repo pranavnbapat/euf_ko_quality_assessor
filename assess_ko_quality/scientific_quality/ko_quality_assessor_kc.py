@@ -1,16 +1,16 @@
 # assess_ko_quality/ko_quality_assessor_kc.py
 """
-KO Quality Assessor using the current `_kc` quality modules.
+KO Quality Assessor using improved quality modules.
 
-This script combines:
-- quality_structural_kc
-- quality_semantic_kc
-- quality_domain_kc
-- quality_functional_kc
+This version uses the improved quality modules:
+- quality_structural_new (cached metrics, configurable thresholds, comprehensive diagnostics)
+- quality_semantic_new (cached spaCy, token-aware truncation, batched inference)
+- quality_domain_new (batched embeddings, token-aware truncation, short-circuit optimization)
+- quality_functional_new (cached metrics, internal 0-10 scaling, case-insensitive matching)
 
 Usage:
-    python ko_quality_assessor_kc.py --input-dir ./input --output-dir ./output
-
+    python ko_quality_assessor_new.py --input-dir ./input --output-dir ./output
+    
 Environment variables:
     KO_INPUT_DIR: Input directory (default: ./input)
     KO_OUTPUT_DIR: Output directory (default: ./output)
