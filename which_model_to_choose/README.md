@@ -75,8 +75,9 @@ This automates the Runpod environment setup:
 
 - creates `.venv` if needed
 - activates it
-- installs repo requirements
-- installs SGLang and runtime dependencies
+- installs `uv`
+- installs repo requirements with `uv`
+- installs SGLang and runtime dependencies with `uv`
 - creates the expected model/cache/output directories
 
 You can then predownload the configured models:

@@ -28,11 +28,11 @@ if [[ ! -d ".venv" ]]; then
 fi
 
 source .venv/bin/activate
-pip install --upgrade pip
+python -m pip install --upgrade pip uv
 if [[ -f requirements.txt ]]; then
-  pip install -r requirements.txt
+  uv pip install --python .venv/bin/python -r requirements.txt
 fi
-pip install sglang openai requests python-dotenv pyyaml tqdm huggingface-hub hf_transfer
+uv pip install --python .venv/bin/python sglang openai requests python-dotenv pyyaml tqdm huggingface-hub hf_transfer
 
 mkdir -p /workspace/models
 mkdir -p /workspace/.cache/huggingface
