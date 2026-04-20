@@ -7,6 +7,7 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 echo "========================================"
 echo " which_model_to_choose SGLang Setup"
 echo "========================================"
+echo "Installing only the dependencies needed for the which_model_to_choose SGLang pipeline."
 
 if [[ ! -d "/workspace" ]]; then
   echo "Error: /workspace not found."
@@ -16,6 +17,11 @@ fi
 if ! command -v nvidia-smi &> /dev/null; then
   echo "Error: nvidia-smi not found. GPU not available?"
   exit 1
+fi
+
+if command -v apt-get &> /dev/null; then
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nano
 fi
 
 echo "GPU detected:"
@@ -29,10 +35,15 @@ fi
 
 source .venv/bin/activate
 python -m pip install --upgrade pip uv
-if [[ -f requirements.txt ]]; then
-  uv pip install --python .venv/bin/python -r requirements.txt
-fi
-uv pip install --python .venv/bin/python sglang openai requests python-dotenv pyyaml tqdm huggingface-hub hf_transfer
+uv pip install --python .venv/bin/python \
+  sglang \
+  openai \
+  requests \
+  python-dotenv \
+  pyyaml \
+  tqdm \
+  huggingface-hub \
+  hf_transfer
 
 mkdir -p /workspace/models
 mkdir -p /workspace/.cache/huggingface

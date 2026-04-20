@@ -76,15 +76,10 @@ This automates the Runpod environment setup:
 - creates `.venv` if needed
 - activates it
 - installs `uv`
-- installs repo requirements with `uv`
-- installs SGLang and runtime dependencies with `uv`
+- installs only the Python dependencies required for the `which_model_to_choose` SGLang pipeline
 - creates the expected model/cache/output directories
 
-You can then predownload the configured models:
-
-```bash
-bash which_model_to_choose/gpu_runtime/download_runtime_models.sh
-```
+### 2. Create runtime `.env`
 
 Then put your runtime secrets in:
 
@@ -100,7 +95,9 @@ SGLANG_API_KEY=sk-sglang-local
 
 For local-control / Runpod-serving mode, set `SGLANG_BASE_URL` to your Runpod OpenAI-compatible endpoint instead of `http://127.0.0.1:8000/v1`.
 
-### 2. Generate GPU-fit model config
+Create this file before generating the GPU-fit config.
+
+### 3. Generate GPU-fit model config
 
 Example for A40:
 
@@ -114,7 +111,15 @@ This updates:
 
 with the models that fit your chosen GPU under the selected constraints.
 
-### 3. Start SGLang
+### 4. Predownload the configured models
+
+Do this only after generating the GPU-fit config, so you download only the models selected for the current GPU.
+
+```bash
+bash which_model_to_choose/gpu_runtime/download_runtime_models.sh
+```
+
+### 5. Start SGLang
 
 Start SGLang for the model you want to test first.
 
@@ -166,7 +171,7 @@ That script will:
 - start the next model
 - repeat until all configured models are processed
 
-### 4. Run summary generation
+### 6. Run summary generation
 
 Use the new generation entrypoint as a module:
 
@@ -218,7 +223,7 @@ This creates:
 - `which_model_to_choose/output/<run_id>/summary_candidates.json`
 - `which_model_to_choose/output/<run_id>/summary_candidates.csv`
 
-### 5. Run metadata generation
+### 7. Run metadata generation
 
 Metadata generation depends on the summaries from a previous summary run.
 
@@ -248,7 +253,7 @@ bash which_model_to_choose/gpu_runtime/run_model_cycle.sh \
   --export-format both
 ```
 
-### 6. Evaluate summaries
+### 8. Evaluate summaries
 
 ```bash
 python -m which_model_to_choose.evaluation.evaluate_summaries --run-id <run_id>
@@ -258,7 +263,7 @@ This creates:
 
 - `which_model_to_choose/artifacts/candidate_runs/<run_id>/evaluation/summary_model_ranking.json`
 
-### 7. Evaluate metadata
+### 9. Evaluate metadata
 
 ```bash
 python -m which_model_to_choose.evaluation.evaluate_metadata --run-id <run_id>
@@ -268,7 +273,7 @@ This creates:
 
 - `which_model_to_choose/artifacts/candidate_runs/<run_id>/evaluation/metadata_model_ranking.json`
 
-### 8. Aggregate results
+### 10. Aggregate results
 
 ```bash
 python -m which_model_to_choose.evaluation.aggregate_results --run-id <run_id>
@@ -278,7 +283,7 @@ This creates:
 
 - `which_model_to_choose/artifacts/candidate_runs/<run_id>/evaluation/combined_model_ranking.json`
 
-### 9. Choose best models
+### 11. Choose best models
 
 ```bash
 python -m which_model_to_choose.selection.choose_best_models --run-id <run_id>
