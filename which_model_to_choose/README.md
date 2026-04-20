@@ -401,5 +401,7 @@ Still to improve:
 ## Important Notes
 
 - Run the new scripts with `python -m ...`, not as bare files, because they use package-relative imports.
+- The provided shell scripts handle `.venv` activation internally for their own execution.
+- If you run Python commands manually in your shell, activate the venv first with `source .venv/bin/activate`, or call `.venv/bin/python` explicitly.
 - The evaluation layer is currently heuristic. It is useful for ranking candidates, but not yet a fully validated benchmark framework.
 - Summary and metadata winners do not have to be the same model.

@@ -21,7 +21,7 @@ fi
 
 if command -v apt-get &> /dev/null; then
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nano
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nano libnuma1
 fi
 
 echo "GPU detected:"
@@ -37,6 +37,7 @@ source .venv/bin/activate
 python -m pip install --upgrade pip uv
 uv pip install --python .venv/bin/python \
   sglang \
+  sgl_kernel \
   openai \
   requests \
   python-dotenv \

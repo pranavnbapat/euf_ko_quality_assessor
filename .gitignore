@@ -30,6 +30,11 @@ data/
 !static/data/**
 synda/
 testing/
+downloads/
+renders/
+reports/
+output/
+outputs/
 
 /*.nc
 
@@ -44,10 +49,26 @@ testing/
 *.png
 *.np*
 *.rdf
+*.json
+!schemas/*.json
+!which_fields_to_choose/*.json
+!which_model_to_choose/**/*.json
+!input/*_5_24.json
+!input/*_10_24.json
+!input/*_24.json
+!input/*_50_24.json
+!input/*_100_24.json
+!input/*_200_24.json
+!input/*_300_24.json
 
 # Ignore locked files
 *#
 
 data_model_v2/
 florence/
-renders/
+assess_ko_quality/output/
+summary_evaluation/output/
+which_model_to_choose/output/
+which_model_to_choose/artifacts/
+improve_ko/output/
+improve_ko/qa_done/
