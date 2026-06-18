@@ -72,3 +72,33 @@ which_model_to_choose/output/
 which_model_to_choose/artifacts/
 improve_ko/output/
 improve_ko/qa_done/
+
+# Ignore generated/local agriculture anchor artifacts
+assess_ko_quality/anchors/nalt/nalt-full_dwn_20240716.rdf
+assess_ko_quality/anchors/agrovoc/agrovoc_anchor_texts.jsonl
+assess_ko_quality/anchors/nalt/nalt_anchor_texts.jsonl
+assess_ko_quality/anchors/centroids/agri_anchor_centroid.npy
+assess_ko_quality/anchors/centroids/agri_anchor_centroid.meta.json
+
+# Ignore Markdown by default; allow curated repository documentation
+*.md
+!README_fuse_pdf_visoin_and_text.md
+!README_summarise_from_pdf.md
+!assess_ko_quality/DOMAIN_ANCHORS.md
+!assess_ko_quality/KO_CONTENT_QUALITY_ANALYSIS.md
+!assess_ko_quality/KO_CONTENT_QUALITY_DIAGNOSTICS.md
+!assess_ko_quality/KO_QUALITY_ASSESSOR_KC.md
+!assess_ko_quality/KO_QUALITY_EXPLAINED_FOR_NON_TECHNICAL.md
+!assess_ko_quality/SUMMARY_GENERATION_FRAMEWORK.md
+!assess_ko_quality/scientific_quality/README.md
+!summary_evaluation/01_evaluate_chunks.md
+!summary_evaluation/01_plot_evaluation.md
+!summary_evaluation/02_evaluate_chunks.md
+!summary_evaluation/02_plot_evaluation_chunks.md
+!summary_evaluation/03_evaluate_chunks.md
+!summary_evaluation/03_plot_nli_results.md
+!summary_evaluation/04_evaluate_chunks.md
+!summary_evaluation/README.md
+!which_fields_to_choose/README.md
+!which_model_to_choose/README.md
+!which_model_to_choose/RESTRUCTURE_CHECKLIST.md

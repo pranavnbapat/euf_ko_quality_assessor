@@ -1,0 +1,15 @@
+[
+  {
+    "query": "anaerobic digestion nutrient management",
+    "relevant": {
+      "PUT_DOC_ID_HERE": 3,
+      "PUT_ANOTHER_DOC_ID_HERE": 2
+    }
+  },
+  {
+    "query": "soil health crop rotation",
+    "relevant": {
+      "PUT_DOC_ID_HERE": 3
+    }
+  }
+]

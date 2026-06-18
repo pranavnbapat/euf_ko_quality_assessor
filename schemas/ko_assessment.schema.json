@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eufarmbook.org/schemas/ko_assessment.schema.json",
+  "title": "EU-FarmBook KO Quality Assessment",
+  "type": "object",
+  "required": ["_orig_id", "title", "lang_detected", "Total_Score",
+               "Semantic_Precision", "Content_Richness",
+               "Cross_Field_Consistency", "Linguistic_Integrity", "rubric_version"],
+  "properties": {
+    "_orig_id": { "type": "string" },
+    "@id":      { "type": "string" },
+    "title":    { "type": "string", "maxLength": 500 },
+    "lang_detected": { "type": "string" },
+
+    "Semantic_Precision":   { "type": "number", "minimum": 0, "maximum": 40 },
+    "Content_Richness":     { "type": "number", "minimum": 0, "maximum": 20 },
+    "Cross_Field_Consistency": { "type": "number", "minimum": 0, "maximum": 20 },
+    "Linguistic_Integrity": { "type": "number", "minimum": 0, "maximum": 20 },
+    "Total_Score":          { "type": "number", "minimum": 0, "maximum": 100 },
+
+    "sp_title":                { "type": "number" },
+    "sp_desc":                 { "type": "number" },
+    "sp_keyword_anchoring":    { "type": "number" },
+    "cr_depth":                { "type": "number" },
+    "cr_diversity":            { "type": "number" },
+    "cr_duplication":          { "type": "number" },
+    "cf_topics_themes":        { "type": "number" },
+    "cf_project_echo":         { "type": "number" },
+    "li_spell_score":          { "type": "number" },
+    "li_misspell_ratio":       { "type": "number" },
+
+    "url_valid":          { "type": "boolean" },
+    "project_url_fixed":  { "type": "string" },
+    "doi_valid":          { "type": "boolean" },
+
+    "empty_fields": { "type": "string" },
+    "notes":        { "type": "string" },
+
+    "category":        { "type": "string" },
+    "subcategories":   { "type": "string" },
+    "keywords":        { "type": "string" },
+    "topics":          { "type": "string" },
+    "themes":          { "type": "string" },
+
+    "gate_decision": {
+      "type": "string",
+      "enum": ["publish", "needs_fixes", "not_fit"]
+    },
+    "rubric_version": { "type": "string", "pattern": "^v\\d{4}-\\d{2}-\\d{2}$" },
+    "assessed_at":    { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": true
+}
