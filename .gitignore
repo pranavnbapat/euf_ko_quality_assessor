@@ -52,6 +52,7 @@ outputs/
 *.json
 !schemas/*.json
 !which_fields_to_choose/*.json
+which_fields_to_choose/opensearch_mapping_final_improved_13_02_2026.json
 !which_model_to_choose/**/*.json
 !input/*_5_24.json
 !input/*_10_24.json
