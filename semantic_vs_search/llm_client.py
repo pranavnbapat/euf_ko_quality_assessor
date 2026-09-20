@@ -88,6 +88,7 @@ class LLMClient:
         timeout: float = 120.0,
         max_retries: int = 4,
         temperature: float = 0.0,
+        max_output_tokens: int = 4000,
     ) -> None:
         base = base_url.rstrip("/")
         self.endpoint = base + ("" if base.endswith("/v1") else "/v1") + "/chat/completions"
@@ -97,6 +98,9 @@ class LLMClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.temperature = temperature
+        # Ceiling for the escalation above. Reasoning models need room; this
+        # stops a pathological case from asking for an unbounded completion.
+        self.max_output_tokens = max_output_tokens
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         self._lock = threading.Lock()
@@ -104,6 +108,7 @@ class LLMClient:
         self.completion_tokens = 0
         self.calls = 0
         self.cache_hits = 0
+        self._drop_reasoning_effort = False
 
     # ------------------------------------------------------------------
     def _cache_path(self, payload: dict[str, Any]) -> str:
@@ -133,6 +138,14 @@ class LLMClient:
                     self.cache_hits += 1
                 return json.load(fh)["content"]
 
+        # Models disagree about reasoning_effort: a thinking model needs it set
+        # to "none" or it spends the whole budget thinking and returns null
+        # content, while others reject the field outright with a 400. Drop it on
+        # the first such refusal and remember, so a mixed panel of judges works
+        # without per-model configuration.
+        if self._drop_reasoning_effort:
+            payload.pop("reasoning_effort", None)
+
         body = json.dumps(payload).encode("utf-8")
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
@@ -154,13 +167,39 @@ class LLMClient:
                     self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
                     self.completion_tokens += int(usage.get("completion_tokens") or 0)
                 if not content:
-                    raise ValueError("model returned empty content")
+                    # A reasoning model that will not accept reasoning_effort
+                    # spends the token budget thinking and returns nothing. The
+                    # budget, not the prompt, is what failed - so grow it and
+                    # try again rather than burning retries on the same cap.
+                    if payload["max_tokens"] < self.max_output_tokens:
+                        payload["max_tokens"] = min(self.max_output_tokens,
+                                                    payload["max_tokens"] * 4)
+                        body = json.dumps(payload).encode("utf-8")
+                        log.info("%s returned no content; raising max_tokens to %d",
+                                 self.model, payload["max_tokens"])
+                        continue
+                    raise ValueError(
+                        f"{self.model} returned empty content even at "
+                        f"max_tokens={payload['max_tokens']}")
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump({"content": content, "usage": usage}, fh)
                 return content
             except Exception as exc:  # noqa: BLE001 - retry anything transient
                 last_error = exc
-                if isinstance(exc, urllib.error.HTTPError) and exc.code in (400, 401, 403):
+                if isinstance(exc, urllib.error.HTTPError) and exc.code == 400:
+                    detail = ""
+                    try:
+                        detail = exc.read().decode("utf-8", "ignore")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if "reasoning" in detail.lower() and "reasoning_effort" in payload:
+                        log.info("%s rejects reasoning_effort; retrying without it", self.model)
+                        self._drop_reasoning_effort = True
+                        payload.pop("reasoning_effort", None)
+                        body = json.dumps(payload).encode("utf-8")
+                        continue
+                    raise
+                if isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403):
                     raise
                 delay = min(20.0, (2 ** attempt) * 0.8) * (0.6 + 0.8 * random.random())
                 log.debug("LLM retry %d after %s (%.1fs)", attempt + 1, type(exc).__name__, delay)
