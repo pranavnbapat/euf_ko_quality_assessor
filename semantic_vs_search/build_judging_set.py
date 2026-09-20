@@ -36,6 +36,7 @@ import os
 import random
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict
@@ -52,9 +53,17 @@ _BOT_HINTS = ("bot", "crawl", "spider", "scrap", "curl", "wget", "python-request
 
 
 def load_env(*paths: str) -> dict[str, str]:
+    """Merge .env files, then fall back to the real environment.
+
+    Running inside the service container is the only place the ClickHouse
+    hostname resolves, and there the credentials arrive as environment
+    variables rather than as a file - the image deliberately excludes .env.
+    Falling back to os.environ means the container route needs no arguments,
+    while an explicitly passed file still wins.
+    """
     merged: dict[str, str] = {}
     for path in paths:
-        if not os.path.exists(path):
+        if not path or not os.path.exists(path):
             continue
         with open(path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -62,6 +71,12 @@ def load_env(*paths: str) -> dict[str, str]:
                 if line and not line.startswith("#") and "=" in line:
                     key, value = line.split("=", 1)
                     merged.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    for key in ("CLICKHOUSE_URL", "CLICKHOUSE_USER", "CLICKHOUSE_PASSWORD",
+                "CLICKHOUSE_DB", "OPENSEARCH_API_USR", "OPENSEARCH_API_PWD",
+                "BASIC_AUTH_USER", "BASIC_AUTH_PASS",
+                "EUF_OPENSEARCH_TRUSTED_PROXY_TOKEN"):
+        if not merged.get(key) and os.getenv(key):
+            merged[key] = os.environ[key]
     return merged
 
 
@@ -137,7 +152,22 @@ def cmd_export(args: argparse.Namespace) -> None:
         FORMAT JSONEachRow
     """
     log.info("Querying ClickHouse for the last %d days ...", args.days)
-    raw = clickhouse_query(env, sql)
+    try:
+        raw = clickhouse_query(env, sql)
+    except urllib.error.URLError as exc:
+        host = (env.get("CLICKHOUSE_URL") or "http://euf_search_clickhouse:8123")
+        sys.exit(
+            f"Could not reach ClickHouse at {host}: {exc.reason}\n\n"
+            "That hostname usually only resolves inside the compose network. Either\n"
+            "run this from within the service container, where the credentials are\n"
+            "already in the environment and no arguments are needed:\n"
+            "    docker compose cp build_judging_set.py scout_search_api:/tmp/bjs.py\n"
+            "    docker compose exec scout_search_api python /tmp/bjs.py export \\\n"
+            "        --out /tmp/real_queries.json --days 90 --size 50\n\n"
+            "or point CLICKHOUSE_URL at a reachable address, e.g. a published port\n"
+            "or an SSH tunnel:\n"
+            "    CLICKHOUSE_URL=http://127.0.0.1:8123 python3 build_judging_set.py export ..."
+        )
     rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
     log.info("  %d distinct logged searches", len(rows))
 
