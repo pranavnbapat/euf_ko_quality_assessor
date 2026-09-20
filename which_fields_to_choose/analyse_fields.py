@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import time
 
@@ -41,6 +42,81 @@ MAX_DISCOVERED_FIELDS = int(os.getenv("AF_MAX_FIELDS", "200"))
 MAX_NESTED_DEPTH = int(os.getenv("AF_MAX_DEPTH", "1"))
 MAX_ENUM_CARDINALITY = int(os.getenv("AF_MAX_ENUM_CARDINALITY", "200"))
 MIN_COVERAGE = float(os.getenv("AF_MIN_COVERAGE", "0.05"))
+
+# --- Facet shape (absolute counts, deliberately NOT ratios) -----------------
+# A facet is judged by how many distinct values it has, because that is what a
+# facet UI has to render. Ratios like distinct/n_docs are corpus-size dependent:
+# the same vocabulary scores differently on a 300-doc sample and a 13k export.
+FACET_MIN_VALUES = int(os.getenv("AF_FACET_MIN_VALUES", "2"))
+FACET_IDEAL_MAX = int(os.getenv("AF_FACET_IDEAL_MAX", "40"))
+FACET_USABLE_MAX = int(os.getenv("AF_FACET_USABLE_MAX", "200"))
+
+# --- Pseudo-query benchmark -------------------------------------------------
+BENCH_QUERIES = int(os.getenv("AF_BENCH_QUERIES", "1500"))
+BENCH_QUERY_TERMS = int(os.getenv("AF_QUERY_TERMS", "8"))
+BENCH_SEED = int(os.getenv("AF_SEED", "13"))
+# Fields the pseudo-queries are drawn from. They are removed from the pool if
+# they also appear in a bundle being evaluated (see select_query_source_fields).
+QUERY_SOURCE_PREFERENCE = [
+    field.strip()
+    for field in os.getenv(
+        "AF_QUERY_SOURCE",
+        "ko_content_flat,title,keywords,description,subtitle",
+    ).split(",")
+    if field.strip()
+]
+
+# --- Role assignment cutoffs ------------------------------------------------
+FULL_TEXT_THRESHOLD = float(os.getenv("AF_FULL_TEXT_THRESHOLD", "0.40"))
+FACET_THRESHOLD = float(os.getenv("AF_FACET_THRESHOLD", "0.35"))
+SORT_THRESHOLD = float(os.getenv("AF_SORT_THRESHOLD", "0.35"))
+
+# --- Policy layer -----------------------------------------------------------
+# These lists are a decision, not a measurement: prefer LLM-improved metadata
+# over the originals, keep fingerprints and URLs out of the index. The scores
+# above gate them, and every case where policy and evidence disagree is
+# reported rather than silently resolved.
+POLICY_FULL_TEXT_PRIORITY = [
+    "title_llm",
+    "subtitle_llm",
+    "description_llm",
+    "keywords_llm",
+    "ko_content_flat_summarised",
+]
+POLICY_FULL_TEXT_FALLBACKS = ["project_name", "project_acronym"]
+POLICY_FACETS = [
+    "themes",
+    "subcategories",
+    "locations_flat",
+    "languages",
+    "project_id",
+    "project_acronym",
+    "date_of_completion",
+    "ko_created_at",
+    "ko_updated_at",
+    "creators",
+    "category",
+    "project_type",
+    "license",
+]
+POLICY_EXCLUDED = [
+    "ko_content_flat",
+    "title",
+    "subtitle",
+    "description",
+    "keywords",
+]
+
+FULL_TEXT_ROLES = {"full_text", "index_optional"}
+FACET_ROLES = {"facet_filter", "sort_filter"}
+
+# Tokens too generic to make a useful pseudo-query term.
+_QUERY_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
+    "have", "has", "had", "not", "but", "its", "it", "of", "in", "on", "to",
+    "as", "by", "at", "an", "a", "is", "be", "or", "can", "will", "which",
+    "their", "there", "these", "those", "than", "then", "also", "such", "more",
+}
 
 logging.basicConfig(
     level=os.getenv("LOGLEVEL", "INFO"),
@@ -84,7 +160,10 @@ def looks_like_record(obj: Any) -> bool:
 
 
 def looks_like_record_list(obj: Any) -> bool:
-    return isinstance(obj, list) and obj and all(isinstance(x, dict) for x in obj[: min(20, len(obj))])
+    # Checked over the whole list, not a 20-element prefix: a stray non-dict
+    # further in would otherwise surface much later as an AttributeError
+    # inside flatten_record.
+    return isinstance(obj, list) and bool(obj) and all(isinstance(x, dict) for x in obj)
 
 
 def extract_records(root: Any) -> list[dict[str, Any]]:
@@ -112,11 +191,17 @@ def load_records(path: str) -> list[dict[str, Any]]:
     t0 = time.time()
 
     if first in ("[", "{"):
-        with open(path, "r", encoding="utf-8") as fh:
-            root = json.load(fh)
-        records = extract_records(root)
-        log.info("Loaded %d records from JSON in %.1fs", len(records), time.time() - t0)
-        return records
+        # A JSONL file also starts with "{", so a failed whole-file parse is
+        # the signal to retry line by line rather than an error to report.
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                root = json.load(fh)
+        except json.JSONDecodeError:
+            root = None
+        if root is not None:
+            records = extract_records(root)
+            log.info("Loaded %d records from JSON in %.1fs", len(records), time.time() - t0)
+            return records
 
     records: list[dict[str, Any]] = []
     with open(path, "r", encoding="utf-8") as fh:
@@ -124,7 +209,10 @@ def load_records(path: str) -> list[dict[str, Any]]:
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path} is neither valid JSON nor JSONL (line {line_no}: {exc})") from exc
             if not isinstance(obj, dict):
                 raise ValueError(f"JSONL line {line_no} is not an object")
             records.append(obj)
@@ -198,16 +286,21 @@ def flatten_dict(value: dict[str, Any], prefix: str, depth: int, out: dict[str, 
         out[prefix] = value
         return
 
-    scalar_children = 0
+    emitted_children = 0
     for key, child in value.items():
         child_key = f"{prefix}.{key}" if prefix else str(key)
         if isinstance(child, dict):
+            before = len(out)
             flatten_dict(child, child_key, depth + 1, out)
+            emitted_children += len(out) - before
         else:
             out[child_key] = child
-            scalar_children += 1
+            emitted_children += 1
 
-    if scalar_children == 0 and prefix:
+    # Only fall back to storing the container itself when nothing was emitted
+    # for it. Counting dict children too avoids reporting the parent object
+    # *and* its flattened children as two separate fields.
+    if emitted_children == 0 and prefix:
         out[prefix] = value
 
 
@@ -279,23 +372,136 @@ def bm25_prepare(docs_tokens: list[list[str]], k1: float = 1.2, b: float = 0.75)
     return idf, dl, avgdl, k1, b
 
 
-def mm(values: list[float]) -> list[float]:
-    if not values:
+class Bm25Index:
+    """Postings-list BM25 over a fixed set of documents.
+
+    Extracted so the field audit, the pseudo-query benchmark and the judged
+    evaluator all score with exactly the same implementation.
+    """
+
+    def __init__(self, docs_tokens: list[list[str]], k1: float = 1.2, b: float = 0.75) -> None:
+        self.n_docs = len(docs_tokens)
+        self.idf, dl, avgdl, self.k1, self.b = bm25_prepare(docs_tokens, k1=k1, b=b)
+        self.den_vec = self.k1 * (1 - self.b + self.b * (dl / (avgdl or 1.0))) + 1e-12
+
+        postings_docs: dict[str, list[int]] = defaultdict(list)
+        postings_tfs: dict[str, list[int]] = defaultdict(list)
+        for doc_id, tokens in enumerate(docs_tokens):
+            if not tokens:
+                continue
+            for term, freq in Counter(tokens).items():
+                postings_docs[term].append(doc_id)
+                postings_tfs[term].append(freq)
+
+        self.postings = {
+            term: (
+                np.fromiter(doc_ids, dtype=np.int32, count=len(doc_ids)),
+                np.fromiter(postings_tfs[term], dtype=np.float64, count=len(doc_ids)),
+            )
+            for term, doc_ids in postings_docs.items()
+        }
+        self.empty = not self.postings
+
+    def score(self, query_tokens: list[str]) -> np.ndarray:
+        scores = np.zeros(self.n_docs, dtype=np.float64)
+        for term in set(query_tokens):
+            weight = self.idf.get(term)
+            if weight is None:
+                continue
+            hit = self.postings.get(term)
+            if hit is None:
+                continue
+            hit_doc_ids, tfs = hit
+            denom = self.den_vec[hit_doc_ids]
+            scores[hit_doc_ids] += weight * ((tfs * (self.k1 + 1.0)) / (tfs + denom))
+        return scores
+
+    def top_k(self, query_tokens: list[str], k: int) -> list[int]:
+        if not query_tokens or self.empty:
+            return []
+        return top_k_positive(self.score(query_tokens), k)
+
+
+def top_k_positive(scores: np.ndarray, k: int) -> list[int]:
+    """Top-k document ids, considering only documents that actually matched.
+
+    Plain ``argsort(-scores)[:k]`` pads the result with whatever documents sit
+    at the front of the corpus whenever fewer than k documents match, because
+    every non-matching document ties at 0.0. Those padded ids are then scored
+    as if they had been retrieved.
+    """
+    hit_ids = np.flatnonzero(scores > 0.0)
+    if hit_ids.size == 0:
         return []
-    lo, hi = min(values), max(values)
-    if abs(hi - lo) < 1e-12:
-        return [0.0 for _ in values]
-    return [(value - lo) / (hi - lo) for value in values]
+    order = np.argsort(-scores[hit_ids], kind="stable")[:k]
+    return hit_ids[order].tolist()
 
 
-def find_query_fields(field_names: list[str]) -> list[str]:
-    lower_map = {name.lower(): name for name in field_names}
-    preferred = []
-    for needle in ("title", "name", "headline", "keyword", "description", "subtitle"):
-        for lname, original in lower_map.items():
-            if needle in lname and original not in preferred:
-                preferred.append(original)
-    return preferred[:3]
+def saturating(value: float, midpoint: float) -> float:
+    """Map a non-negative quantity into [0, 1) with no dependence on the corpus.
+
+    Used instead of min-max scaling for absolute quantities (token counts),
+    so a field's score does not change just because some *other* field in the
+    same file happened to be the longest one.
+    """
+    if value <= 0.0 or midpoint <= 0.0:
+        return 0.0
+    return math.log1p(value) / math.log1p(midpoint) if value < midpoint else 1.0
+
+
+def normalised_idf(avg_idf: float, n_docs: int) -> float:
+    """IDF rescaled by corpus size so it is comparable across input files."""
+    ceiling = math.log(n_docs + 1.0)
+    if ceiling <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, avg_idf / ceiling))
+
+
+def facet_cardinality_fitness(distinct: int) -> float:
+    """How well a distinct-value count suits a facet control.
+
+    Scale-invariant by construction: it reads the absolute number of values a
+    user would have to choose between, not distinct/n_docs.
+    """
+    if distinct < FACET_MIN_VALUES:
+        return 0.0  # one value filters nothing
+    if distinct <= FACET_IDEAL_MAX:
+        return 1.0
+    if distinct >= FACET_USABLE_MAX:
+        return 0.0
+    span = FACET_USABLE_MAX - FACET_IDEAL_MAX
+    return max(0.0, 1.0 - (distinct - FACET_IDEAL_MAX) / span)
+
+
+def facet_reuse(mean_value_frequency: float) -> float:
+    """How much work one facet value does, i.e. how many documents it selects.
+
+    A field whose values never repeat is a label, not a filter: picking a value
+    would return a single document. Absolute cardinality alone cannot see this
+    on a small corpus, where "87 distinct values" looks like a usable facet even
+    though there are only 87 records.
+    """
+    if mean_value_frequency <= 1.0:
+        return 0.0
+    return min(1.0, math.log(mean_value_frequency) / math.log(10.0))
+
+
+def normalised_entropy(counts: list[int]) -> float:
+    """Shannon entropy of a value distribution, normalised to [0, 1].
+
+    This is what "balanced facet" should mean: 1.0 when documents spread evenly
+    over the values, near 0.0 when one value swallows the corpus.
+    """
+    total = sum(counts)
+    if total <= 0 or len(counts) < 2:
+        return 0.0
+    entropy = 0.0
+    for count in counts:
+        if count <= 0:
+            continue
+        p = count / total
+        entropy -= p * math.log(p)
+    return max(0.0, min(1.0, entropy / math.log(len(counts))))
 
 
 def field_mapping_hint(kind: str, avg_tokens: float, cardinality_ratio: float, array_ratio: float) -> str:
@@ -353,96 +559,144 @@ def field_flags(field: str) -> dict[str, bool]:
     }
 
 
-def self_retrieval_score(
-    records_by_field: dict[str, list[str]],
-    candidate_fields: list[str],
-    query_fields: list[str],
-) -> float:
-    n_docs = len(next(iter(records_by_field.values()))) if records_by_field else 0
-    if n_docs == 0:
-        return 0.0
+def select_query_source_fields(
+    available_fields: set[str],
+    bundle_fields: set[str],
+) -> tuple[list[str], list[str]]:
+    """Pick fields to draw pseudo-queries from, held out from every bundle.
 
-    docs_tokens: list[list[str]] = []
-    queries: list[list[str]] = []
-    for idx in range(n_docs):
-        doc_tokens: list[str] = []
-        query_text: list[str] = []
-        for field in candidate_fields:
-            doc_tokens.extend(tok(records_by_field[field][idx]))
-        for field in query_fields:
-            query_text.append(records_by_field[field][idx])
-        docs_tokens.append(doc_tokens)
-        queries.append(tok(" ".join(query_text)))
-
-    if not any(doc_tokens for doc_tokens in docs_tokens):
-        return 0.0
-
-    idf, dl, avgdl, k1, b = bm25_prepare(docs_tokens)
-    den_vec = k1 * (1 - b + b * (dl / (avgdl or 1.0))) + 1e-12
-
-    postings_docs: dict[str, list[int]] = defaultdict(list)
-    postings_tfs: dict[str, list[int]] = defaultdict(list)
-    for doc_id, tokens in enumerate(docs_tokens):
-        if not tokens:
+    A pseudo-query built from the same field that is being ranked guarantees a
+    match, so any field used as a query source is dropped from the pool. What
+    is dropped is returned too, so the report can say why.
+    """
+    chosen: list[str] = []
+    dropped: list[str] = []
+    for field in QUERY_SOURCE_PREFERENCE:
+        if field not in available_fields:
             continue
-        tf = Counter(tokens)
-        for term, freq in tf.items():
-            postings_docs[term].append(doc_id)
-            postings_tfs[term].append(freq)
+        if field in bundle_fields:
+            dropped.append(field)
+            continue
+        chosen.append(field)
+    return chosen, dropped
 
-    postings = {
-        term: (
-            np.fromiter(doc_ids, dtype=np.int32),
-            np.fromiter(postings_tfs[term], dtype=np.float64),
+
+def build_pseudo_queries(
+    per_field_text: dict[str, list[str]],
+    query_source_fields: list[str],
+    n_docs: int,
+    sample_size: int = BENCH_QUERIES,
+    terms_per_query: int = BENCH_QUERY_TERMS,
+    seed: int = BENCH_SEED,
+) -> tuple[list[int], list[list[str]]]:
+    """Short keyword-style queries drawn from held-out text.
+
+    For each sampled document, the highest tf-idf terms of its *query source*
+    text become the query, and that document is the target. This imitates a
+    user searching for a document by its subject matter, instead of pasting
+    the indexed field back in as the query.
+
+    Returns (target_doc_ids, query_token_lists), aligned.
+    """
+    if not query_source_fields or n_docs == 0:
+        return [], []
+
+    token_lists: list[list[str]] = []
+    for idx in range(n_docs):
+        parts = [per_field_text[field][idx] for field in query_source_fields if field in per_field_text]
+        token_lists.append(tok(" ".join(parts)))
+
+    idf, _, _, _, _ = bm25_prepare(token_lists)
+
+    eligible = [idx for idx, tokens in enumerate(token_lists) if tokens]
+    rng = random.Random(seed)
+    if sample_size and len(eligible) > sample_size:
+        target_ids = sorted(rng.sample(eligible, sample_size))
+    else:
+        target_ids = eligible
+
+    doc_ids: list[int] = []
+    queries: list[list[str]] = []
+    for idx in target_ids:
+        counts = Counter(
+            term
+            for term in token_lists[idx]
+            if len(term) > 2 and term not in _QUERY_STOPWORDS and not term.isdigit()
         )
-        for term, doc_ids in postings_docs.items()
-    }
-
-    reciprocal_rank = 0.0
-    scored_queries = 0
-    idxs = np.arange(n_docs)
-
-    for doc_id, query_tokens in enumerate(queries):
-        if not query_tokens:
+        if not counts:
             continue
-        scored_queries += 1
-        scores = np.zeros(n_docs, dtype=np.float64)
-        for term in set(query_tokens):
-            weight = idf.get(term)
-            if weight is None or term not in postings:
-                continue
-            hit_doc_ids, tfs = postings[term]
-            denom = den_vec[hit_doc_ids]
-            scores[hit_doc_ids] += weight * ((tfs * (k1 + 1.0)) / (tfs + denom))
+        ranked = sorted(
+            counts.items(),
+            key=lambda item: (-(item[1] * idf.get(item[0], 0.0)), item[0]),
+        )
+        terms = [term for term, _ in ranked[:terms_per_query]]
+        if not terms:
+            continue
+        doc_ids.append(idx)
+        queries.append(terms)
 
-        if n_docs > TOPK:
-            kth = np.partition(scores, -TOPK)[-TOPK]
-            if scores[doc_id] < kth:
-                continue
-
-        score_i = scores[doc_id]
-        rank = int(((scores > score_i).sum()) + ((scores == score_i) & (idxs < doc_id)).sum() + 1)
-        if rank <= TOPK:
-            reciprocal_rank += 1.0 / rank
-
-    return reciprocal_rank / max(1, scored_queries)
+    return doc_ids, queries
 
 
-def build_query_texts(per_field_text: dict[str, list[str]], n_docs: int) -> list[list[str]]:
-    preferred_query_fields = [
-        "title_llm",
-        "keywords_llm",
-        "description_llm",
-        "title",
-        "keywords",
-        "description",
-    ]
-    active_fields = [field for field in preferred_query_fields if field in per_field_text]
-    queries: list[list[str]] = []
-    for idx in range(n_docs):
-        parts = [per_field_text[field][idx] for field in active_fields]
-        queries.append(tok(" ".join(parts)))
-    return queries
+def query_term_leakage(
+    doc_ids: list[int],
+    queries: list[list[str]],
+    per_field_text: dict[str, list[str]],
+    field: str,
+) -> float:
+    """Mean share of a query's terms that occur verbatim in `field` of its target.
+
+    Residual circularity, measured rather than assumed. 1.0 means the field
+    literally contains the query; near 0.0 means the benchmark is asking the
+    field to match vocabulary it does not already hold.
+    """
+    if field not in per_field_text or not queries:
+        return 0.0
+    total = 0.0
+    for doc_id, terms in zip(doc_ids, queries):
+        if not terms:
+            continue
+        field_tokens = set(tok(per_field_text[field][doc_id]))
+        total += sum(1 for term in terms if term in field_tokens) / len(terms)
+    return total / len(queries)
+
+
+def field_retrieval_scores(
+    per_field_text: dict[str, list[str]],
+    fields: list[str],
+    doc_ids: list[int],
+    queries: list[list[str]],
+    n_docs: int,
+    exclude: set[str] | None = None,
+) -> dict[str, float]:
+    """MRR@TOPK of each field on its own, against the held-out pseudo-queries.
+
+    Computed for every eligible field rather than a hand-picked handful, so the
+    retrieval term of full_text_score means the same thing for all of them.
+    """
+    results: dict[str, float] = {}
+    exclude = exclude or set()
+    if not queries:
+        return {field: 0.0 for field in fields}
+
+    for field in fields:
+        if field in exclude:
+            # The queries were drawn from this field, so it would score ~1.0 by
+            # construction. Reported as not applicable instead of as evidence.
+            continue
+        docs_tokens = [tok(per_field_text[field][idx]) for idx in range(n_docs)]
+        index = Bm25Index(docs_tokens)
+        if index.empty:
+            results[field] = 0.0
+            continue
+        reciprocal_rank = 0.0
+        for target_id, terms in zip(doc_ids, queries):
+            for rank, hit in enumerate(index.top_k(terms, TOPK), start=1):
+                if hit == target_id:
+                    reciprocal_rank += 1.0 / rank
+                    break
+        results[field] = reciprocal_rank / len(queries)
+    return results
 
 
 def list_value_set(values: dict[str, list[Any]], field: str, idx: int) -> set[str]:
@@ -458,47 +712,106 @@ def scalar_value(values: dict[str, list[Any]], field: str, idx: int) -> str:
     return atoms[0].strip().lower() if atoms else ""
 
 
-def graded_qrels(per_field_values: dict[str, list[Any]], n_docs: int) -> list[dict[int, int]]:
-    qrels: list[dict[int, int]] = []
+# A taxonomy value shared by more than this share of the corpus says nothing
+# about relevance, so it is not allowed to create judgements. Without it, a
+# coarse field such as `category` marks a fifth of the corpus relevant to every
+# query and pins Recall@k at its arithmetic ceiling.
+QREL_MAX_BUCKET_RATIO = float(os.getenv("AF_QREL_MAX_BUCKET_RATIO", "0.25"))
+
+# One shared taxonomy value is weak evidence of relevance when the vocabulary
+# is small. Requiring agreement on several keeps the judgements meaningful.
+QREL_MIN_TAXONOMY_OVERLAP = int(os.getenv("AF_QREL_MIN_OVERLAP", "2"))
+
+QREL_PROJECT_FIELDS = ("project_id", "project_acronym")
+QREL_TAXONOMY_FIELDS = ("themes", "topics", "subcategories")
+
+
+def graded_qrels(
+    per_field_values: dict[str, list[Any]],
+    n_docs: int,
+    query_doc_ids: list[int] | None = None,
+) -> tuple[list[dict[int, int]], dict[str, Any]]:
+    """Weak relevance labels for the pseudo-queries.
+
+    Grades: the target document itself = 3, same project = 2, shared taxonomy
+    value = 1. `category` is deliberately not used — see QREL_MAX_BUCKET_RATIO.
+
+    Built through inverted indexes over precomputed per-document keys, so the
+    cost is proportional to the postings actually touched rather than to
+    n_docs^2. The previous pairwise version re-derived every other document's
+    keys inside the inner loop.
+    """
+    targets = list(range(n_docs)) if query_doc_ids is None else list(query_doc_ids)
+
+    project_keys: list[set[str]] = []
+    taxonomy_keys: list[set[str]] = []
     for idx in range(n_docs):
-        rels: dict[int, int] = {idx: 3}
-        source_project = scalar_value(per_field_values, "project_id", idx)
-        source_acronym = scalar_value(per_field_values, "project_acronym", idx)
-        source_category = scalar_value(per_field_values, "category", idx)
-        source_themes = list_value_set(per_field_values, "themes", idx)
-        source_topics = list_value_set(per_field_values, "topics", idx)
-        source_subcats = list_value_set(per_field_values, "subcategories", idx)
+        proj = {
+            f"{field}={scalar_value(per_field_values, field, idx)}"
+            for field in QREL_PROJECT_FIELDS
+            if scalar_value(per_field_values, field, idx)
+        }
+        taxo: set[str] = set()
+        for field in QREL_TAXONOMY_FIELDS:
+            taxo |= {f"{field}={value}" for value in list_value_set(per_field_values, field, idx)}
+        project_keys.append(proj)
+        taxonomy_keys.append(taxo)
 
-        for jdx in range(n_docs):
-            if jdx == idx:
+    project_index: dict[str, list[int]] = defaultdict(list)
+    taxonomy_index: dict[str, list[int]] = defaultdict(list)
+    for idx in range(n_docs):
+        for key in project_keys[idx]:
+            project_index[key].append(idx)
+        for key in taxonomy_keys[idx]:
+            taxonomy_index[key].append(idx)
+
+    max_bucket = max(1, int(QREL_MAX_BUCKET_RATIO * n_docs))
+    skipped_buckets = sorted(
+        (key for key, docs in taxonomy_index.items() if len(docs) > max_bucket),
+        key=lambda key: -len(taxonomy_index[key]),
+    )
+    skipped = set(skipped_buckets)
+
+    qrels: list[dict[int, int]] = []
+    for idx in targets:
+        overlap: Counter[int] = Counter()
+        for key in taxonomy_keys[idx]:
+            if key in skipped:
                 continue
-            grade = 0
-            if source_project and source_project == scalar_value(per_field_values, "project_id", jdx):
-                grade = max(grade, 2)
-            if source_acronym and source_acronym == scalar_value(per_field_values, "project_acronym", jdx):
-                grade = max(grade, 2)
+            for other in taxonomy_index[key]:
+                if other != idx:
+                    overlap[other] += 1
 
-            overlap = 0
-            overlap += len(source_themes & list_value_set(per_field_values, "themes", jdx))
-            overlap += len(source_topics & list_value_set(per_field_values, "topics", jdx))
-            overlap += len(source_subcats & list_value_set(per_field_values, "subcategories", jdx))
-            if overlap > 0:
-                grade = max(grade, 1)
-            if source_category and source_category == scalar_value(per_field_values, "category", jdx):
-                grade = max(grade, 1)
-
-            if grade > 0:
-                rels[jdx] = grade
+        rels: dict[int, int] = {
+            other: 1
+            for other, shared in overlap.items()
+            if shared >= QREL_MIN_TAXONOMY_OVERLAP
+        }
+        for key in project_keys[idx]:
+            for other in project_index[key]:
+                if other != idx:
+                    rels[other] = max(rels.get(other, 0), 2)
+        rels[idx] = 3
         qrels.append(rels)
-    return qrels
+
+    sizes = [len(rels) for rels in qrels] or [0]
+    meta = {
+        "mean_relevant": sum(sizes) / len(sizes),
+        "max_relevant": max(sizes),
+        "min_overlap": QREL_MIN_TAXONOMY_OVERLAP,
+        "skipped_buckets": skipped_buckets[:5],
+        "skipped_bucket_count": len(skipped_buckets),
+        "max_bucket": max_bucket,
+    }
+    return qrels, meta
 
 
 def rank_docs_for_fields(
     per_field_text: dict[str, list[str]],
     candidate_fields: list[str],
     queries: list[list[str]],
+    n_docs: int,
 ) -> list[list[int]]:
-    n_docs = len(queries)
     docs_tokens: list[list[str]] = []
     for idx in range(n_docs):
         tokens: list[str] = []
@@ -507,46 +820,10 @@ def rank_docs_for_fields(
                 tokens.extend(tok(per_field_text[field][idx]))
         docs_tokens.append(tokens)
 
-    if not any(tokens for tokens in docs_tokens):
-        return [[] for _ in range(n_docs)]
-
-    idf, dl, avgdl, k1, b = bm25_prepare(docs_tokens)
-    den_vec = k1 * (1 - b + b * (dl / (avgdl or 1.0))) + 1e-12
-
-    postings_docs: dict[str, list[int]] = defaultdict(list)
-    postings_tfs: dict[str, list[int]] = defaultdict(list)
-    for doc_id, tokens in enumerate(docs_tokens):
-        if not tokens:
-            continue
-        tf = Counter(tokens)
-        for term, freq in tf.items():
-            postings_docs[term].append(doc_id)
-            postings_tfs[term].append(freq)
-
-    postings = {
-        term: (
-            np.fromiter(doc_ids, dtype=np.int32),
-            np.fromiter(postings_tfs[term], dtype=np.float64),
-        )
-        for term, doc_ids in postings_docs.items()
-    }
-
-    rankings: list[list[int]] = []
-    for query_tokens in queries:
-        if not query_tokens:
-            rankings.append([])
-            continue
-        scores = np.zeros(n_docs, dtype=np.float64)
-        for term in set(query_tokens):
-            weight = idf.get(term)
-            if weight is None or term not in postings:
-                continue
-            hit_doc_ids, tfs = postings[term]
-            denom = den_vec[hit_doc_ids]
-            scores[hit_doc_ids] += weight * ((tfs * (k1 + 1.0)) / (tfs + denom))
-        ranked = np.argsort(-scores, kind="stable")[:TOPK]
-        rankings.append(ranked.tolist())
-    return rankings
+    index = Bm25Index(docs_tokens)
+    if index.empty:
+        return [[] for _ in queries]
+    return [index.top_k(query_tokens, TOPK) for query_tokens in queries]
 
 
 def dcg_at_k(ranked_ids: list[int], rels: dict[int, int], k: int) -> float:
@@ -561,6 +838,7 @@ def dcg_at_k(ranked_ids: list[int], rels: dict[int, int], k: int) -> float:
 def evaluate_bundle(rankings: list[list[int]], qrels: list[dict[int, int]], k: int) -> dict[str, float]:
     mrr = 0.0
     recall = 0.0
+    recall_ceiling = 0.0
     ndcg = 0.0
     n_queries = 0
 
@@ -585,10 +863,15 @@ def evaluate_bundle(rankings: list[list[int]], qrels: list[dict[int, int]], k: i
         ideal_dcg = sum((2 ** gain - 1) / math.log2(rank + 1) for rank, gain in enumerate(ideal[:k], start=1))
         ndcg += dcg_at_k(topk, rels, k) / ideal_dcg if ideal_dcg > 0 else 0.0
 
+        # Recall@k cannot exceed k/|relevant|. Tracking the ceiling keeps the
+        # reported figure interpretable when the qrels are broad.
+        recall_ceiling += min(1.0, k / max(1, len(relevant_ids)))
+
     denom = max(1, n_queries)
     return {
         "mrr_at_k": mrr / denom,
         "recall_at_k": recall / denom,
+        "recall_ceiling_at_k": recall_ceiling / denom,
         "ndcg_at_k": ndcg / denom,
         "queries": float(n_queries),
     }
@@ -609,6 +892,7 @@ def build_ablation_candidates(preferred_full_text: list[str]) -> list[tuple[str,
 
 def summarise_ablation_results(
     benchmark_results: list[tuple[str, dict[str, float], list[str]]],
+    benchmark: dict[str, Any] | None = None,
 ) -> list[str]:
     if not benchmark_results:
         return ["No ablation benchmark summary available."]
@@ -648,12 +932,36 @@ def summarise_ablation_results(
             + ", ".join(f"{field} (delta {delta:+.4f})" for delta, field, _ in harmful[:3])
             + "."
         )
+
+    spread = max(metrics["ndcg_at_k"] for _, metrics, _ in benchmark_results) - min(
+        metrics["ndcg_at_k"] for _, metrics, _ in benchmark_results
+    )
+    if spread < 0.01:
+        lines.append(
+            f"Caution: the whole ablation spans only {spread:.4f} nDCG. That is too narrow to rank "
+            "fields against each other; treat every field above as untested rather than confirmed."
+        )
+
+    leakage = (benchmark or {}).get("leakage") or {}
+    leaky = sorted((field for field, value in leakage.items() if value >= 0.25), key=lambda f: -leakage[f])
+    if leaky:
+        lines.append(
+            "Caution: "
+            + ", ".join(f"{field} ({leakage[field]:.0%} of query terms)" for field in leaky[:3])
+            + " already contain much of the query vocabulary, so their ablation deltas are partly circular."
+        )
     return lines
 
 
 def analyse_fields(
     records: list[dict[str, Any]],
-) -> tuple[dict[str, dict[str, Any]], list[tuple[tuple[str, ...], float]], list[tuple[str, dict[str, float], list[str]]]]:
+    run_benchmark: bool = True,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[tuple[str, dict[str, float], list[str]]]]:
+    """Diagnose every field, score it for each role, and optionally benchmark.
+
+    Set run_benchmark=False when only the field report and the recommended
+    bundle are needed; that skips the qrels build and the ablation passes.
+    """
     flattened = [flatten_record(record) for record in records]
     all_fields = Counter()
     for record in flattened:
@@ -692,8 +1000,12 @@ def analyse_fields(
         avg_tokens = float(np.mean([len(tokens) for tokens in non_empty_token_lists])) if non_empty_token_lists else 0.0
         avg_chars = float(np.mean([len(text) for text in non_empty_texts])) if non_empty_texts else 0.0
 
-        idf, _, _, _, _ = bm25_prepare(token_lists)
+        # IDF over the documents that actually have this field. Including the
+        # empty ones inflates IDF for sparse fields: a term present in 1 of 10
+        # populated records looks maximally rare against a 13k-document corpus.
+        idf, _, _, _, _ = bm25_prepare(non_empty_token_lists)
         avg_idf = float(np.mean(list(idf.values()))) if idf else 0.0
+        avg_idf_norm = normalised_idf(avg_idf, len(non_empty_token_lists))
 
         exact_unique = len(set(non_empty_texts)) / max(1, non_empty_count)
         boilerplate = 1.0 - exact_unique
@@ -701,8 +1013,11 @@ def analyse_fields(
         atoms: list[str] = []
         for value in non_empty_values:
             atoms.extend(atomic_values(value))
-        distinct_atoms = len(set(atoms))
+        atom_counts = Counter(atoms)
+        distinct_atoms = len(atom_counts)
         cardinality_ratio = distinct_atoms / max(1, non_empty_count)
+        value_entropy = normalised_entropy(list(atom_counts.values()))
+        mean_value_frequency = (sum(atom_counts.values()) / distinct_atoms) if distinct_atoms else 0.0
 
         likely_enum = (
             dominant_kind in {"string", "string_list"}
@@ -725,9 +1040,12 @@ def analyse_fields(
             "avg_tokens": avg_tokens,
             "avg_chars": avg_chars,
             "avg_idf": avg_idf,
+            "avg_idf_norm": avg_idf_norm,
             "boilerplate": boilerplate,
             "cardinality_ratio": cardinality_ratio,
             "distinct_atoms": distinct_atoms,
+            "value_entropy": value_entropy,
+            "mean_value_frequency": mean_value_frequency,
             "array_ratio": array_ratio,
             "object_ratio": object_ratio,
             "likely_enum": likely_enum,
@@ -735,147 +1053,183 @@ def analyse_fields(
             "flags": flags,
         }
 
+    scored_fields = [field for field, stats in report.items() if stats["coverage"] >= MIN_COVERAGE]
+    benchmark: dict[str, Any] = {
+        "ran": False,
+        "reason": "no fields cleared the coverage threshold",
+        "query_source": [],
+        "query_source_dropped": [],
+        "queries": 0,
+        "leakage": {},
+        "qrels": {},
+    }
+    if not scored_fields:
+        return report, benchmark, []
+
     eligible_text = [
-        field for field, stats in report.items()
-        if stats["coverage"] >= MIN_COVERAGE
-        and stats["dominant_kind"] in {"string", "string_list"}
-        and stats["mapping_hint"] in {"text", "text+keyword", "keyword"}
-        and stats["avg_tokens"] >= 2.0
+        field for field in scored_fields
+        if report[field]["dominant_kind"] in {"string", "string_list"}
+        and report[field]["mapping_hint"] in {"text", "text+keyword", "keyword"}
+        and report[field]["avg_tokens"] >= 2.0
     ]
 
-    query_fields = [field for field in find_query_fields(field_names) if report.get(field, {}).get("coverage", 0.0) >= MIN_COVERAGE]
-    retrieval_results: list[tuple[tuple[str, ...], float]] = []
-    if eligible_text and query_fields:
-        top_fields = sorted(
-            eligible_text,
-            key=lambda field: (
-                report[field]["coverage"],
-                report[field]["avg_idf"],
-                report[field]["avg_tokens"],
-            ),
-            reverse=True,
-        )[:6]
-        candidates = {(field,) for field in top_fields}
-        if "title" in top_fields and any(field in top_fields for field in ("description", "ko_content_flat", "keywords")):
-            for extra in ("description", "ko_content_flat", "keywords"):
-                if extra in top_fields and extra != "title":
-                    candidates.add(tuple(sorted(("title", extra))))
-            combo = tuple(sorted([field for field in ("title", "description", "ko_content_flat", "keywords") if field in top_fields]))
-            if len(combo) >= 2:
-                candidates.add(combo)
+    # Every field the policy layer could put in a bundle is held out of the
+    # pseudo-queries, so no bundle is ever asked to retrieve its own text.
+    bundle_union = {
+        field
+        for field in POLICY_FULL_TEXT_PRIORITY + POLICY_FULL_TEXT_FALLBACKS
+        if field in report
+    }
+    query_source, query_source_dropped = select_query_source_fields(set(per_field_text), bundle_union)
+    query_doc_ids, queries = build_pseudo_queries(per_field_text, query_source, n_docs)
 
-        for candidate in sorted(candidates):
-            score = self_retrieval_score(per_field_text, list(candidate), query_fields)
-            retrieval_results.append((candidate, score))
-
-    text_fields = [field for field, stats in report.items() if stats["coverage"] >= MIN_COVERAGE]
-    if text_fields:
-        cov_norm = dict(zip(text_fields, mm([report[field]["coverage"] for field in text_fields])))
-        idf_norm = dict(zip(text_fields, mm([report[field]["avg_idf"] for field in text_fields])))
-        tokens_norm = dict(zip(text_fields, mm([min(report[field]["avg_tokens"], 200.0) for field in text_fields])))
-        low_boiler_norm = dict(zip(text_fields, mm([1.0 - report[field]["boilerplate"] for field in text_fields])))
-        sort_bias = dict(
-            zip(
-                text_fields,
-                [
-                    1.0 if report[field]["mapping_hint"] == "date"
-                    else 0.9 if report[field]["mapping_hint"] in {"long", "float"}
-                    else 0.7 if report[field]["mapping_hint"] == "keyword" and report[field]["array_ratio"] < 0.3
-                    else 0.0
-                    for field in text_fields
-                ],
-            )
+    if queries:
+        log.info(
+            "Pseudo-queries: %d queries of <=%d terms from %s",
+            len(queries), BENCH_QUERY_TERMS, ", ".join(query_source),
         )
-        facet_balance = dict(
-            zip(
-                text_fields,
-                [
-                    1.0 - min(abs(report[field]["cardinality_ratio"] - 0.25) / 0.25, 1.0)
-                    if report[field]["mapping_hint"] == "keyword" or report[field]["likely_enum"]
-                    else 0.0
-                    for field in text_fields
-                ],
-            )
+        retrieval_scores = field_retrieval_scores(
+            per_field_text, eligible_text, query_doc_ids, queries, n_docs, exclude=set(query_source)
+        )
+    else:
+        retrieval_scores = {}
+        benchmark["reason"] = (
+            "no held-out query source available: "
+            + (", ".join(query_source_dropped) + " are all inside the candidate bundle"
+               if query_source_dropped else "none of " + ", ".join(QUERY_SOURCE_PREFERENCE) + " is present")
         )
 
-        retrieval_map = {candidate[0][0]: candidate[1] for candidate in retrieval_results if len(candidate[0]) == 1}
-        retr_norm = dict(zip(text_fields, mm([retrieval_map.get(field, 0.0) for field in text_fields])))
+    for field in scored_fields:
+        stats = report[field]
+        coverage = stats["coverage"]
+        low_boilerplate = 1.0 - stats["boilerplate"]
+        length_fitness = saturating(stats["avg_tokens"], 200.0)
+        retrieval = retrieval_scores.get(field, 0.0)
+        is_query_source = field in query_source
+        flags = stats["flags"]
 
-        for field in text_fields:
-            stats = report[field]
-            # Heuristic scoring layer:
-            # - full_text_score rewards populated, discriminative, information-rich fields
-            #   with some support from the self-retrieval proxy
-            #     0.35 * coverage_norm
-            #   + 0.20 * avg_idf_norm
-            #   + 0.15 * avg_tokens_norm
-            #   + 0.10 * low_boilerplate_norm
-            #   + 0.20 * retrieval_norm
-            # - facet_score rewards populated fields with stable keyword/date/numeric behaviour
-            #   and a "reasonable" cardinality for filters/facets
-            #     0.40 * coverage_norm
-            #   + 0.35 * facet_balance
-            #   + 0.15 * low_boilerplate_norm
-            #   + 0.10 * type_bonus
-            # - sort_score rewards populated scalar fields, especially dates and numerics
-            #     0.50 * coverage_norm
-            #   + 0.35 * sort_bias
-            #   + 0.15 * low_boilerplate_norm
-            #
-            # These are hand-tuned heuristics for ranking candidates, not calibrated or learned scores.
-            full_text_score = (
-                0.35 * cov_norm[field]
-                + 0.20 * idf_norm[field]
-                + 0.15 * tokens_norm[field]
-                + 0.10 * low_boiler_norm[field]
-                + 0.20 * retr_norm[field]
-            )
-            if stats["mapping_hint"] == "keyword" and not stats["likely_enum"]:
-                full_text_score *= 0.45
-            if stats["mapping_hint"] == "keyword" and not stats["flags"]["is_name_like"]:
-                full_text_score *= 0.35
-            if stats["dominant_kind"] not in {"string", "string_list"}:
-                full_text_score *= 0.2
-            if stats["flags"]["is_hashy"] or stats["flags"]["is_id_like"] or stats["flags"]["is_url_like"]:
-                full_text_score *= 0.05
-            elif stats["flags"]["is_internal"] and not stats["flags"]["is_name_like"]:
-                full_text_score *= 0.15
+        # ------------------------------------------------------------------
+        # full_text_score - is this field worth ranking on?
+        #     0.30 * coverage            (raw, already 0-1)
+        #   + 0.20 * avg_idf_norm        (IDF / log(n_populated); corpus-size free)
+        #   + 0.20 * length_fitness      (log-saturating on avg tokens, 200 = full)
+        #   + 0.10 * (1 - boilerplate)
+        #   + 0.20 * retrieval           (MRR@10 on held-out pseudo-queries)
+        #
+        # then multiplied down by the penalties below. All inputs are absolute
+        # quantities, so a field's score does not move because some other field
+        # in the same file happened to be the longest or the rarest.
+        # ------------------------------------------------------------------
+        full_text_score = (
+            0.30 * coverage
+            + 0.20 * stats["avg_idf_norm"]
+            + 0.20 * length_fitness
+            + 0.10 * low_boilerplate
+            + 0.20 * retrieval
+        )
+        if stats["mapping_hint"] == "keyword" and not stats["likely_enum"]:
+            full_text_score *= 0.45
+        if stats["mapping_hint"] == "keyword" and not flags["is_name_like"]:
+            full_text_score *= 0.35
+        if stats["dominant_kind"] not in {"string", "string_list"}:
+            full_text_score *= 0.2
+        if flags["is_hashy"] or flags["is_id_like"] or flags["is_url_like"]:
+            full_text_score *= 0.05
+        elif flags["is_internal"] and not flags["is_name_like"]:
+            full_text_score *= 0.15
 
-            facet_score = (
-                0.40 * cov_norm[field]
-                + 0.35 * facet_balance[field]
-                + 0.15 * low_boiler_norm[field]
-                + 0.10 * (1.0 if stats["mapping_hint"] in {"keyword", "date", "boolean", "long", "float"} else 0.0)
-            )
-            if stats["dominant_kind"] in {"object", "object_list", "mixed_list"}:
-                facet_score *= 0.2
-            if stats["flags"]["is_internal"] and stats["flags"]["is_hashy"]:
-                facet_score *= 0.65
+        # ------------------------------------------------------------------
+        # facet_score - is this field worth offering as a filter?
+        #     0.25 * coverage
+        #   + 0.25 * cardinality_fitness (absolute distinct count: 2..40 ideal)
+        #   + 0.25 * facet_reuse         (documents selected per value; 1 value
+        #                                 per document is a label, not a filter)
+        #   + 0.15 * value_entropy       (how evenly documents spread over values)
+        #   + 0.10 * type_bonus
+        #
+        # Repetition is what makes a facet work, so - unlike full_text_score -
+        # nothing here penalises a field for reusing its values, and the shape
+        # term reads the absolute number of choices a user would be shown
+        # rather than distinct/n_docs.
+        # ------------------------------------------------------------------
+        facet_score = (
+            0.25 * coverage
+            + 0.25 * facet_cardinality_fitness(stats["distinct_atoms"])
+            + 0.25 * facet_reuse(stats["mean_value_frequency"])
+            + 0.15 * stats["value_entropy"]
+            + 0.10 * (1.0 if stats["mapping_hint"] in {"keyword", "date", "boolean", "long", "float"} else 0.0)
+        )
+        if stats["dominant_kind"] in {"object", "object_list", "mixed_list"}:
+            facet_score *= 0.2
+        if flags["is_hashy"] or flags["is_id_like"]:
+            facet_score *= 0.1
+        elif flags["is_internal"]:
+            facet_score *= 0.5
 
-            sort_score = (
-                0.50 * cov_norm[field]
-                + 0.35 * sort_bias[field]
-                + 0.15 * low_boiler_norm[field]
-            )
-            if stats["array_ratio"] > 0.5:
-                sort_score *= 0.2
-            if stats["flags"]["is_hashy"] or stats["flags"]["is_url_like"]:
-                sort_score *= 0.3
+        # ------------------------------------------------------------------
+        # sort_score - can documents be meaningfully ordered by this field?
+        # Zero unless the field is actually sortable. Coverage alone must never
+        # be enough, or every fully-populated text field outranks its own
+        # full_text_score and gets filed as a sort field.
+        # ------------------------------------------------------------------
+        if stats["mapping_hint"] == "date":
+            sort_bias = 1.0
+        elif stats["mapping_hint"] in {"long", "float"}:
+            sort_bias = 0.9
+        elif (
+            stats["mapping_hint"] in {"keyword", "text+keyword"}
+            and stats["array_ratio"] < 0.3
+            and stats["cardinality_ratio"] >= 0.5
+        ):
+            sort_bias = 0.4  # alphabetical ordering of a near-unique label
+        else:
+            sort_bias = 0.0
 
-            stats["full_text_score"] = full_text_score
-            stats["facet_score"] = facet_score
-            stats["sort_score"] = sort_score
-        preferred = resolve_preferred_fields(report)
-        query_tokens = build_query_texts(per_field_text, n_docs)
-        qrels = graded_qrels(per_field_values, n_docs)
-        benchmark_results: list[tuple[str, dict[str, float], list[str]]] = []
-        for label, fields in build_ablation_candidates(preferred["full_text"]):
-            rankings = rank_docs_for_fields(per_field_text, fields, query_tokens)
-            metrics = evaluate_bundle(rankings, qrels, TOPK)
-            benchmark_results.append((label, metrics, fields))
-        return report, retrieval_results, benchmark_results
+        sort_score = 0.0 if sort_bias == 0.0 else sort_bias * (0.60 + 0.40 * coverage)
+        if flags["is_hashy"] or flags["is_url_like"]:
+            sort_score *= 0.3
 
-    return report, retrieval_results, []
+        stats["full_text_score"] = full_text_score
+        stats["facet_score"] = facet_score
+        stats["sort_score"] = sort_score
+        stats["retrieval_mrr"] = retrieval
+        stats["retrieval_is_query_source"] = is_query_source
+
+    preferred = resolve_preferred_fields(report)
+    benchmark.update(
+        {
+            "query_source": query_source,
+            "query_source_dropped": query_source_dropped,
+            "queries": len(queries),
+        }
+    )
+
+    if not run_benchmark:
+        benchmark["reason"] = "benchmark skipped by caller"
+        return report, benchmark, []
+    if not queries:
+        return report, benchmark, []  # reason set when the query source was chosen
+    if not preferred["full_text"]:
+        benchmark["reason"] = "no full-text fields were recommended"
+        return report, benchmark, []
+
+    qrels, qrels_meta = graded_qrels(per_field_values, n_docs, query_doc_ids)
+    benchmark["qrels"] = qrels_meta
+    benchmark["leakage"] = {
+        field: query_term_leakage(query_doc_ids, queries, per_field_text, field)
+        for field in preferred["full_text"]
+    }
+    benchmark["ran"] = True
+    benchmark["reason"] = ""
+
+    benchmark_results: list[tuple[str, dict[str, float], list[str]]] = []
+    for label, fields in build_ablation_candidates(preferred["full_text"]):
+        rankings = rank_docs_for_fields(per_field_text, fields, queries, n_docs)
+        metrics = evaluate_bundle(rankings, qrels, TOPK)
+        benchmark_results.append((label, metrics, fields))
+
+    return report, benchmark, benchmark_results
+
 
 
 def choose_role(stats: dict[str, Any]) -> str:
@@ -891,77 +1245,88 @@ def choose_role(stats: dict[str, Any]) -> str:
     facet = stats.get("facet_score", 0.0)
     sort_score = stats.get("sort_score", 0.0)
 
-    if stats["flags"]["is_url_like"] and full_text < 0.35:
+    if stats["flags"]["is_url_like"] and full_text < FULL_TEXT_THRESHOLD:
         return "skip_display_only"
-    if stats["mapping_hint"] == "keyword" and not stats["flags"]["is_name_like"] and facet >= 0.30:
+    if stats["mapping_hint"] == "keyword" and not stats["flags"]["is_name_like"] and facet >= FACET_THRESHOLD:
         return "facet_filter" if facet >= sort_score else "sort_filter"
 
-    if full_text >= max(facet, sort_score, 0.45):
+    if full_text >= max(facet, sort_score, FULL_TEXT_THRESHOLD):
         return "full_text"
-    if facet >= max(full_text, sort_score, 0.35):
+    if facet >= max(full_text, sort_score, FACET_THRESHOLD):
         return "facet_filter"
-    if sort_score >= 0.35:
+    if sort_score >= max(SORT_THRESHOLD, full_text):
         return "sort_filter"
     if stats["mapping_hint"] in {"text", "text+keyword", "keyword", "date", "long", "float", "boolean"}:
         return "index_optional"
     return "skip"
 
 
-def resolve_preferred_fields(report: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
-    full_text_candidates = [
-        field for field, stats in report.items()
-        if choose_role(stats) in {"full_text", "index_optional", "sort_filter"}
-    ]
-    facet_candidates = [
-        field for field, stats in report.items()
-        if choose_role(stats) in {"facet_filter", "sort_filter"}
-    ]
+def resolve_preferred_fields(report: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Apply the policy lists, gated by the measured roles.
 
-    llm_priority = [
-        "title_llm",
-        "subtitle_llm",
-        "description_llm",
-        "keywords_llm",
-        "ko_content_flat_summarised",
-    ]
+    Returns the chosen fields plus `overrides`: policy picks that the evidence
+    does not support and policy drops that it does, so the report can show
+    where the two disagree instead of presenting policy as a finding.
+    """
+    roles = {field: choose_role(stats) for field, stats in report.items()}
+    overrides: list[str] = []
+
     chosen_full_text: list[str] = []
-    seen = set()
-    for field in llm_priority:
-        if field in full_text_candidates and field not in seen:
+    for field in POLICY_FULL_TEXT_PRIORITY + POLICY_FULL_TEXT_FALLBACKS:
+        if field not in report or field in chosen_full_text:
+            continue
+        role = roles[field]
+        score = report[field].get("full_text_score", 0.0)
+        if role in FULL_TEXT_ROLES:
             chosen_full_text.append(field)
-            seen.add(field)
+            continue
+        if role in FACET_ROLES:
+            # Policy wants it searchable even though it scores better as a
+            # filter - keep it, but say so.
+            chosen_full_text.append(field)
+            overrides.append(
+                f"{field}: kept as full-text by policy; measured role is {role} "
+                f"(full_text={score:.3f}, facet={report[field].get('facet_score', 0.0):.3f})"
+            )
+            continue
+        overrides.append(f"{field}: dropped from full-text; measured role is {role} (full_text={score:.3f})")
 
-    for fallback in ("project_name",):
-        if fallback in full_text_candidates and fallback not in seen:
-            chosen_full_text.append(fallback)
-            seen.add(fallback)
+    chosen_facets: list[str] = []
+    for field in POLICY_FACETS:
+        if field not in report or field in chosen_facets:
+            continue
+        if roles[field] in FACET_ROLES:
+            chosen_facets.append(field)
+        else:
+            overrides.append(
+                f"{field}: dropped from facets; measured role is {roles[field]} "
+                f"(facet={report[field].get('facet_score', 0.0):.3f})"
+            )
 
-    # Acronyms are operationally keyword-like, but we still want them searchable
-    # in the final recommendation because users may search directly by acronym.
-    if "project_acronym" in report and "project_acronym" not in seen:
-        chosen_full_text.append("project_acronym")
-        seen.add("project_acronym")
+    strong_unlisted = sorted(
+        field
+        for field, role in roles.items()
+        if role == "facet_filter"
+        and field not in chosen_facets
+        and report[field].get("facet_score", 0.0) >= FACET_THRESHOLD + 0.15
+    )
+    for field in strong_unlisted[:5]:
+        overrides.append(
+            f"{field}: scores well as a facet ({report[field]['facet_score']:.3f}) but is not on the policy list"
+        )
 
-    preferred_facets = [
-        "themes",
-        "subcategories",
-        "locations_flat",
-        "languages",
-        "project_id",
-        "project_acronym",
-        "date_of_completion",
-        "ko_created_at",
-        "ko_updated_at",
-        "creators",
-        "category",
-        "project_type",
-        "license",
-    ]
-    chosen_facets = [field for field in preferred_facets if field in facet_candidates]
+    excluded = [field for field in POLICY_EXCLUDED if field in report]
+    excluded += sorted(
+        field for field, role in roles.items()
+        if role in {"skip_internal", "skip_display_only"} and field not in excluded
+    )
 
     return {
         "full_text": chosen_full_text,
         "facets": chosen_facets,
+        "excluded": excluded,
+        "overrides": overrides,
+        "roles": roles,
     }
 
 
@@ -969,26 +1334,39 @@ def build_report(
     input_path: str,
     records: list[dict[str, Any]],
     report: dict[str, dict[str, Any]],
-    retrieval_results: list[tuple[tuple[str, ...], float]],
+    benchmark: dict[str, Any],
     benchmark_results: list[tuple[str, dict[str, float], list[str]]],
 ) -> str:
     lines: list[str] = []
+    preferred = resolve_preferred_fields(report)
+    roles = preferred["roles"]
+
     lines.append("=== DATASET SUMMARY ===")
     lines.append(f"Input file            : {input_path}")
     lines.append(f"Records analysed      : {len(records)}")
     lines.append(f"Fields analysed       : {len(report)}")
     lines.append(f"Coverage threshold    : {MIN_COVERAGE:.2f}")
 
-    preferred = resolve_preferred_fields(report)
     lines.append("\n=== FINAL PICK FOR THIS FILE ===")
     lines.append("Full-text fields      : " + (", ".join(preferred["full_text"]) or "-"))
     lines.append("Facet/sort fields     : " + (", ".join(preferred["facets"]) or "-"))
-    lines.append("Excluded by policy    : ko_content_flat, title, subtitle, description, keywords, fingerprints, hashes, URLs, DOIs")
+    lines.append("Excluded              : " + (", ".join(preferred["excluded"][:14]) or "-"))
+
+    lines.append("\n=== WHERE POLICY AND EVIDENCE DISAGREE ===")
+    if preferred["overrides"]:
+        lines.append("The field lists above are a policy decision. These are the cases the")
+        lines.append("measurements do not support, or support but policy does not list:")
+        for note in preferred["overrides"]:
+            lines.append(f"  - {note}")
+    else:
+        lines.append("None: every policy pick matches its measured role.")
 
     lines.append("\n=== FIELD DIAGNOSTICS ===")
+    lines.append("cov=coverage  tok=avg tokens  idfn=IDF/log(n populated)  mrr=MRR@10 on held-out")
+    lines.append("pseudo-queries ('src' = queries came from this field)  dist=distinct values\nent=value entropy  boil=exact-duplicate share")
     header = (
-        f"{'field':34} {'role':16} {'map':11} {'cov':>5} {'tok':>6} "
-        f"{'idf':>6} {'card':>6} {'boil':>6} {'kind':18}"
+        f"{'field':34} {'role':16} {'map':11} {'cov':>5} {'tok':>7} "
+        f"{'idfn':>5} {'mrr':>5} {'dist':>6} {'ent':>5} {'boil':>5} {'kind':18}"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -996,100 +1374,141 @@ def build_report(
     ranked_fields = sorted(
         report.items(),
         key=lambda item: (
-            choose_role(item[1]) not in {"full_text", "facet_filter", "sort_filter", "index_optional"},
+            roles[item[0]] not in {"full_text", "facet_filter", "sort_filter", "index_optional"},
             -(item[1].get("full_text_score", 0.0) + item[1].get("facet_score", 0.0)),
             -item[1]["coverage"],
             item[0],
         ),
     )
     for field, stats in ranked_fields:
+        if stats.get("retrieval_is_query_source"):
+            mrr_cell = f"{'src':>5}"  # queries came from this field; not evidence
+        elif "retrieval_mrr" in stats:
+            mrr_cell = f"{stats['retrieval_mrr']:5.2f}"
+        else:
+            mrr_cell = f"{'-':>5}"
         lines.append(
-            f"{field[:34]:34} {choose_role(stats):16} {stats['mapping_hint']:11} "
-            f"{stats['coverage']:5.2f} {stats['avg_tokens']:6.1f} {stats['avg_idf']:6.3f} "
-            f"{stats['cardinality_ratio']:6.2f} {stats['boilerplate']:6.2f} {stats['dominant_kind'][:18]:18}"
+            f"{field[:34]:34} {roles[field]:16} {stats['mapping_hint']:11} "
+            f"{stats['coverage']:5.2f} {stats['avg_tokens']:7.1f} {stats['avg_idf_norm']:5.2f} "
+            f"{mrr_cell} {stats['distinct_atoms']:6d} "
+            f"{stats['value_entropy']:5.2f} {stats['boilerplate']:5.2f} {stats['dominant_kind'][:18]:18}"
         )
 
-    preferred_full_text_fields = [
-        (field, report[field]) for field in preferred["full_text"] if field in report
-    ]
-
-    facet_fields = [
-        (field, stats) for field, stats in report.items()
-        if choose_role(stats) in {"facet_filter", "sort_filter"}
-    ]
-    facet_fields.sort(key=lambda item: (item[1].get("facet_score", 0.0), item[1].get("sort_score", 0.0)), reverse=True)
-    identifier_fields = [
-        (field, stats) for field, stats in report.items()
-        if choose_role(stats) == "identifier_only"
-    ]
-    identifier_fields.sort(key=lambda item: item[0])
-
     lines.append("\n=== RECOMMENDED FULL-TEXT FIELDS ===")
-    if preferred_full_text_fields:
-        for field, stats in preferred_full_text_fields:
+    if preferred["full_text"]:
+        for field in preferred["full_text"]:
+            stats = report[field]
             lines.append(
                 f"{field:34} score={stats.get('full_text_score', 0.0):.3f}  "
-                f"mapping={stats['mapping_hint']}  coverage={stats['coverage']:.2f}  avg_tokens={stats['avg_tokens']:.1f}"
+                f"role={roles[field]:14} mapping={stats['mapping_hint']}  "
+                f"coverage={stats['coverage']:.2f}  avg_tokens={stats['avg_tokens']:.1f}"
             )
     else:
         lines.append("No strong full-text fields found.")
 
     lines.append("\n=== RECOMMENDED FILTER / SORT FIELDS ===")
-    if facet_fields:
-        for field, stats in facet_fields[:15]:
+    if preferred["facets"]:
+        by_evidence = sorted(
+            preferred["facets"],
+            key=lambda field: -max(
+                report[field].get("facet_score", 0.0), report[field].get("sort_score", 0.0)
+            ),
+        )
+        for field in by_evidence:
+            stats = report[field]
             lines.append(
-                f"{field:34} facet={stats.get('facet_score', 0.0):.3f}  sort={stats.get('sort_score', 0.0):.3f}  "
-                f"mapping={stats['mapping_hint']}  card={stats['cardinality_ratio']:.2f}"
+                f"{field:34} facet={stats.get('facet_score', 0.0):.3f}  "
+                f"sort={stats.get('sort_score', 0.0):.3f}  role={roles[field]:14} "
+                f"mapping={stats['mapping_hint']}  values={stats['distinct_atoms']}"
             )
     else:
         lines.append("No strong facet/sort fields found.")
 
+    other_facets = [
+        (field, stats) for field, stats in report.items()
+        if roles[field] in FACET_ROLES and field not in preferred["facets"]
+    ]
+    other_facets.sort(key=lambda item: item[1].get("facet_score", 0.0), reverse=True)
+    if other_facets:
+        lines.append("\nOther fields that measure well as filters but are not on the policy list:")
+        for field, stats in other_facets[:10]:
+            lines.append(
+                f"{field:34} facet={stats.get('facet_score', 0.0):.3f}  "
+                f"sort={stats.get('sort_score', 0.0):.3f}  values={stats['distinct_atoms']}"
+            )
+
+    identifier_fields = sorted(field for field, role in roles.items() if role == "identifier_only")
     lines.append("\n=== IDENTIFIER-ONLY FIELDS ===")
     if identifier_fields:
-        for field, stats in identifier_fields:
+        for field in identifier_fields:
             lines.append(
-                f"{field:34} mapping={stats['mapping_hint']}  coverage={stats['coverage']:.2f}"
+                f"{field:34} mapping={report[field]['mapping_hint']}  coverage={report[field]['coverage']:.2f}"
             )
     else:
         lines.append("No identifier-only fields found.")
 
     lines.append("\n=== SUGGESTED MAPPINGS ===")
-    suggested_names = preferred["full_text"] + preferred["facets"]
-    suggested = [(field, report[field]) for field in suggested_names if field in report]
-    for field, stats in suggested:
-        lines.append(mapping_snippet(field, stats["mapping_hint"]))
+    for field in preferred["full_text"] + preferred["facets"]:
+        if field in report:
+            lines.append(mapping_snippet(field, report[field]["mapping_hint"]))
 
     lines.append(f"\n=== PSEUDO-QUERY ABLATION BENCHMARK (TOP {TOPK}) ===")
-    if benchmark_results:
-        lines.append("Uses standard IR metrics on weak pseudo-labels built from self, project, and shared taxonomy overlap.")
+    if benchmark.get("ran") and benchmark_results:
+        qrels_meta = benchmark.get("qrels", {})
+        lines.append(
+            "Queries       : "
+            f"{benchmark['queries']} keyword queries of <={BENCH_QUERY_TERMS} terms, "
+            f"drawn from {', '.join(benchmark['query_source'])}"
+        )
+        if benchmark["query_source_dropped"]:
+            lines.append(
+                "Held out      : "
+                + ", ".join(benchmark["query_source_dropped"])
+                + " (inside the candidate bundle, so unusable as a query source)"
+            )
+        lines.append(
+            "Judgements    : self=3, same project=2, "
+            f"{qrels_meta.get('min_overlap', QREL_MIN_TAXONOMY_OVERLAP)}+ shared taxonomy values=1; "
+            f"mean {qrels_meta.get('mean_relevant', 0.0):.1f} relevant per query "
+            f"(max {qrels_meta.get('max_relevant', 0)})"
+        )
+        if qrels_meta.get("skipped_bucket_count"):
+            lines.append(
+                f"              {qrels_meta['skipped_bucket_count']} taxonomy value(s) ignored for covering "
+                f">{QREL_MAX_BUCKET_RATIO:.0%} of the corpus, e.g. "
+                + ", ".join(qrels_meta.get("skipped_buckets", [])[:3])
+            )
+        if benchmark.get("leakage"):
+            leak = sorted(benchmark["leakage"].items(), key=lambda item: -item[1])
+            lines.append(
+                "Term overlap  : share of query terms already present in each bundle field "
+                "(lower = less circular)"
+            )
+            lines.append("              " + ", ".join(f"{field}={value:.2f}" for field, value in leak))
+        lines.append("")
         for label, metrics, fields in benchmark_results:
             lines.append(
-                f"{label:28} MRR@{TOPK}={metrics['mrr_at_k']:.4f}  "
-                f"Recall@{TOPK}={metrics['recall_at_k']:.4f}  "
+                f"{label:32} MRR@{TOPK}={metrics['mrr_at_k']:.4f}  "
                 f"nDCG@{TOPK}={metrics['ndcg_at_k']:.4f}  "
+                f"Recall@{TOPK}={metrics['recall_at_k']:.4f}/{metrics['recall_ceiling_at_k']:.4f}  "
                 f"fields={', '.join(fields)}"
             )
+        lines.append("Recall is shown as achieved/ceiling; the ceiling is k divided by the number")
+        lines.append("of relevant documents, which no ranking can beat.")
     else:
-        lines.append("Skipped: no benchmark candidates were generated.")
+        lines.append(f"Skipped: {benchmark.get('reason') or 'no benchmark candidates were generated.'}")
 
     lines.append("\n=== PLAIN-ENGLISH ABLATION SUMMARY ===")
-    for line in summarise_ablation_results(benchmark_results):
+    for line in summarise_ablation_results(benchmark_results, benchmark):
         lines.append(line)
-
-    if retrieval_results:
-        lines.append(f"\n=== SELF-RETRIEVAL PROXY (MRR@{TOPK}) ===")
-        for fields, score in sorted(retrieval_results, key=lambda item: item[1], reverse=True):
-            lines.append(f"{' + '.join(fields):34} score={score:.4f}")
-    else:
-        lines.append(f"\n=== SELF-RETRIEVAL PROXY (MRR@{TOPK}) ===")
-        lines.append("Skipped: no reliable query-like fields were detected.")
 
     lines.append("\n=== NOTES ===")
     lines.append("Use `text` fields for ranking and `keyword`/`date`/numeric fields for facets, filters, and sorting.")
     lines.append("Fields marked `review_structure` are too nested or mixed to map safely without manual design.")
     lines.append("Short repeated label fields often belong in `keyword`; long narrative fields belong in `text`.")
-    lines.append("The pseudo-query benchmark is stronger than raw heuristics, but still weaker than judged query relevance data.")
-    lines.append("The most defensible next step is real query evaluation with labeled relevance and field ablations.")
+    lines.append("Queries here are generated from held-out text, not from the fields being ranked, but they are")
+    lines.append("still synthetic. Judged queries with real relevance labels remain the only decisive evidence;")
+    lines.append("run evaluate_field_bundles.py once you have them.")
 
     return "\n".join(lines)
 
@@ -1115,11 +1534,14 @@ def main() -> None:
 
     max_docs = int(os.getenv("AF_MAX_DOCS", "0"))
     if max_docs and len(records) > max_docs:
-        records = records[:max_docs]
-        log.warning("AF_MAX_DOCS=%d active: using first %d records", max_docs, len(records))
+        # Sampled, not truncated: exports are ordered by project, so the first
+        # N records are a biased slice rather than a smaller version of the set.
+        keep = sorted(random.Random(BENCH_SEED).sample(range(len(records)), max_docs))
+        records = [records[idx] for idx in keep]
+        log.warning("AF_MAX_DOCS=%d active: random sample of %d records (seed %d)", max_docs, len(records), BENCH_SEED)
 
-    report, retrieval_results, benchmark_results = analyse_fields(records)
-    report_text = build_report(input_path, records, report, retrieval_results, benchmark_results)
+    report, benchmark, benchmark_results = analyse_fields(records)
+    report_text = build_report(input_path, records, report, benchmark, benchmark_results)
     print(report_text)
 
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

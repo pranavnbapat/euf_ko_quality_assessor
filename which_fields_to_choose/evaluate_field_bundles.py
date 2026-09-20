@@ -26,8 +26,9 @@ import numpy as np
 
 from analyse_fields import (
     TOPK,
+    Bm25Index,
     analyse_fields,
-    bm25_prepare,
+    flatten_record,
     load_records,
     normalise_text,
     resolve_preferred_fields,
@@ -83,9 +84,13 @@ def build_doc_index(records: list[dict[str, Any]], id_field: str) -> tuple[list[
 
 
 def build_per_field_text(records: list[dict[str, Any]]) -> dict[str, list[str]]:
-    field_names = sorted({key for record in records for key in record.keys()})
-    per_field_text = {field: [] for field in field_names}
-    for record in records:
+    # Flattened exactly as analyse_fields does. Without this, a recommended
+    # field with a dotted name (from a nested object) is missing here and is
+    # dropped from the bundle without a word.
+    flattened = [flatten_record(record) for record in records]
+    field_names = sorted({key for record in flattened for key in record.keys()})
+    per_field_text: dict[str, list[str]] = {field: [] for field in field_names}
+    for record in flattened:
         for field in field_names:
             per_field_text[field].append(normalise_text(record.get(field)))
     return per_field_text
@@ -98,47 +103,23 @@ def rank_queries(
     topk: int,
 ) -> list[list[int]]:
     n_docs = len(next(iter(per_field_text.values()))) if per_field_text else 0
+    missing = [field for field in bundle_fields if field not in per_field_text]
+    if missing:
+        raise ValueError(
+            "Bundle references fields that are not in the input records: " + ", ".join(missing)
+        )
+
     docs_tokens: list[list[str]] = []
     for idx in range(n_docs):
         tokens: list[str] = []
         for field in bundle_fields:
-            if field in per_field_text:
-                tokens.extend(tok(per_field_text[field][idx]))
+            tokens.extend(tok(per_field_text[field][idx]))
         docs_tokens.append(tokens)
 
-    idf, dl, avgdl, k1, b = bm25_prepare(docs_tokens)
-    den_vec = k1 * (1 - b + b * (dl / (avgdl or 1.0))) + 1e-12
-
-    postings_docs: dict[str, list[int]] = defaultdict(list)
-    postings_tfs: dict[str, list[int]] = defaultdict(list)
-    for doc_id, tokens in enumerate(docs_tokens):
-        if not tokens:
-            continue
-        tf = Counter(tokens)
-        for term, freq in tf.items():
-            postings_docs[term].append(doc_id)
-            postings_tfs[term].append(freq)
-    postings = {
-        term: (
-            np.fromiter(doc_ids, dtype=np.int32),
-            np.fromiter(postings_tfs[term], dtype=np.float64),
-        )
-        for term, doc_ids in postings_docs.items()
-    }
-
-    rankings: list[list[int]] = []
-    for query in queries:
-        q_tokens = tok(query)
-        scores = np.zeros(n_docs, dtype=np.float64)
-        for term in set(q_tokens):
-            weight = idf.get(term)
-            if weight is None or term not in postings:
-                continue
-            hit_doc_ids, tfs = postings[term]
-            denom = den_vec[hit_doc_ids]
-            scores[hit_doc_ids] += weight * ((tfs * (k1 + 1.0)) / (tfs + denom))
-        rankings.append(np.argsort(-scores, kind="stable")[:topk].tolist())
-    return rankings
+    index = Bm25Index(docs_tokens)
+    if index.empty:
+        return [[] for _ in queries]
+    return [index.top_k(tok(query), topk) for query in queries]
 
 
 def dcg_at_k(ranked_doc_ids: list[str], rels: dict[str, int], k: int) -> float:
@@ -158,6 +139,7 @@ def evaluate_metrics(
 ) -> dict[str, float]:
     mrr = 0.0
     recall = 0.0
+    recall_ceiling = 0.0
     ndcg = 0.0
     ap_total = 0.0
 
@@ -177,7 +159,10 @@ def evaluate_metrics(
                 precision_sum += hits / rank
         mrr += rr
         recall += hits / max(1, len(relevant_binary))
-        ap_total += precision_sum / max(1, len(relevant_binary))
+        recall_ceiling += min(1.0, topk / max(1, len(relevant_binary)))
+        # AP over the top-k window, normalised by the number of relevant
+        # documents that could fit in it, so the figure is reachable.
+        ap_total += precision_sum / max(1, min(len(relevant_binary), topk))
 
         ideal = sorted(rels.values(), reverse=True)
         ideal_dcg = sum((2 ** gain - 1) / math.log2(rank + 1) for rank, gain in enumerate(ideal[:topk], start=1))
@@ -187,6 +172,7 @@ def evaluate_metrics(
     return {
         "mrr_at_k": mrr / denom,
         "recall_at_k": recall / denom,
+        "recall_ceiling_at_k": recall_ceiling / denom,
         "ndcg_at_k": ndcg / denom,
         "map": ap_total / denom,
     }
@@ -203,7 +189,7 @@ def parse_bundle_arg(bundle_arg: str) -> tuple[str, list[str]]:
 
 
 def default_bundles(records: list[dict[str, Any]]) -> list[tuple[str, list[str]]]:
-    report, _, _ = analyse_fields(records)
+    report, _, _ = analyse_fields(records, run_benchmark=False)
     recommended = resolve_preferred_fields(report)["full_text"]
     bundles: list[tuple[str, list[str]]] = []
     if recommended:
@@ -238,6 +224,10 @@ def main() -> None:
     print(f"TopK             : {args.topk}")
     print("\n=== JUDGED FIELD-BUNDLE EVALUATION ===")
 
+    baseline_label = bundles[0][0]
+    print(f"Baseline         : {baseline_label} (deltas are measured against it)")
+    print()
+
     baseline_ndcg = None
     for label, fields in bundles:
         rankings = rank_queries(per_field_text, fields, queries, args.topk)
@@ -247,12 +237,15 @@ def main() -> None:
         delta = metrics["ndcg_at_k"] - baseline_ndcg
         print(
             f"{label:28} MRR@{args.topk}={metrics['mrr_at_k']:.4f}  "
-            f"Recall@{args.topk}={metrics['recall_at_k']:.4f}  "
             f"nDCG@{args.topk}={metrics['ndcg_at_k']:.4f}  "
+            f"Recall@{args.topk}={metrics['recall_at_k']:.4f}/{metrics['recall_ceiling_at_k']:.4f}  "
             f"MAP={metrics['map']:.4f}  "
             f"delta_nDCG={delta:+.4f}  "
             f"fields={', '.join(fields)}"
         )
+    print()
+    print("Recall is achieved/ceiling; the ceiling is topk divided by the number of judged")
+    print("relevant documents. MAP is computed over the same top-k window.")
 
 
 if __name__ == "__main__":
