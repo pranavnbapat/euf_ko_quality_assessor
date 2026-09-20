@@ -216,6 +216,25 @@ def main() -> None:
     if not bundles:
         raise ValueError("No field bundles to evaluate. Provide --bundle or allow the default ablation bundles.")
 
+    # A judgement set built against a different corpus scores zero on every
+    # bundle, which reads as "all bundles are terrible" rather than "these
+    # judgements are not about these documents". Say so instead.
+    judged_ids = {doc_id for item in judgments for doc_id in item["relevant"]}
+    known = judged_ids & set(doc_ids)
+    coverage = len(known) / max(1, len(judged_ids))
+    if not known:
+        raise SystemExit(
+            f"None of the {len(judged_ids)} judged document ids appear in {args.input} "
+            f"under --id-field {args.id_field!r}.\n"
+            "The judgements and the corpus do not match: check that the export is the "
+            "one the judged searches ran against, and that --id-field names the same "
+            "identifier the judging sheet recorded."
+        )
+    if coverage < 0.9:
+        print(f"WARNING: only {len(known)}/{len(judged_ids)} judged documents "
+              f"({coverage:.0%}) are present in the input corpus. Metrics below are "
+              f"computed over that subset and understate every bundle.\n")
+
     queries = [item["query"] for item in judgments]
     print(f"Input file       : {args.input}")
     print(f"Judgments file   : {args.judgments}")

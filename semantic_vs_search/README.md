@@ -120,6 +120,40 @@ of rank and would add nothing over MRR.
 | `READING OF THE RESULTS` | A rule-based interpretation of the numbers above |
 | `VERDICT` | The recommendation, with its reasons and its limits |
 
+### Replacing the synthetic evidence: `build_judging_set.py`
+
+Everything above rests on queries an LLM invented and relevance an LLM graded.
+Neither has to stay that way. scout logs every search to ClickHouse, so the
+queries users actually typed already exist. This script turns them into a
+spreadsheet a domain expert can grade, in three stages:
+
+```bash
+# 1. on the server, where ClickHouse is reachable
+python build_judging_set.py export --out real_queries.json --days 90 --size 50
+
+# 2. anywhere the search API is reachable
+python build_judging_set.py sheet --queries real_queries.json --out judging.xlsx
+
+# 3. once the `grade` column is filled in
+python build_judging_set.py convert --sheet judging.xlsx --out judgments.json
+python ../which_fields_to_choose/evaluate_field_bundles.py \
+    --input ../input/<export>.json --judgments judgments.json --id-field _id
+```
+
+The sample is stratified by (language, outcome) using proportions computed from
+the logs themselves, so it reflects real usage rather than an assumption about
+it - and it deliberately keeps zero-result searches, which are the only way to
+evaluate the no-match behaviour at all.
+
+The spreadsheet carries a dropdown for the 0-3 grade, a second sheet explaining
+the scale, and one row per retrieved document. Grading the same sheet twice,
+independently, gives an agreement rate - which is the number that says how far
+any of this can be trusted, including the LLM judge used elsewhere in this
+folder.
+
+Use `--id-field _id`, not `@id`: the sheet records the parent document id the
+search API returns, which joins to the export's `_id`.
+
 ### What this test cannot tell you
 
 Stated in the report itself, and worth repeating:
