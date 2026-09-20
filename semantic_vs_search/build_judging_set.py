@@ -197,9 +197,21 @@ def cmd_export(args: argparse.Namespace) -> None:
 
 # ------------------------------------------------------------------- sheet ---
 
-def search(env: dict[str, str], term: str, size: int, base_url: str, model: str) -> list[dict[str, Any]]:
-    body = json.dumps({"search_term": term, "model": model, "page": 1,
-                       "size": size, "dev": False}).encode()
+def search(env: dict[str, str], term: str, size: int, base_url: str, model: str,
+           ui_locale: str | None = None) -> list[dict[str, Any]]:
+    """Run one search exactly as the platform would.
+
+    ui_locale matters enormously and is easy to omit: it is what switches on the
+    translated *_i18n fields. Measured on real logged queries, a Spanish search
+    returns 10 results with the locale and 0 without, because the documents'
+    indexed metadata is not in Spanish. A judging sheet built without it would
+    show graders results no user would ever see.
+    """
+    payload: dict[str, Any] = {"search_term": term, "model": model, "page": 1,
+                               "size": size, "dev": False}
+    if ui_locale:
+        payload["ui_locale"] = ui_locale
+    body = json.dumps(payload).encode()
     auth = base64.b64encode(
         f"{env.get('OPENSEARCH_API_USR') or env.get('BASIC_AUTH_USER','')}:"
         f"{env.get('OPENSEARCH_API_PWD') or env.get('BASIC_AUTH_PASS','')}".encode()
@@ -249,8 +261,12 @@ def cmd_sheet(args: argparse.Namespace) -> None:
         term = (item.get("original_query") or "").strip()
         if not term:
             continue
+        # The language the search was made in is the best available stand-in for
+        # the UI locale, which the log does not record.
+        locale = None if args.no_locale else (
+            args.ui_locale or (item.get("detected_lang") or "")[:2] or None)
         try:
-            hits = search(env, term, args.topk, args.base_url, args.model)
+            hits = search(env, term, args.topk, args.base_url, args.model, locale)
         except Exception as exc:  # noqa: BLE001 - one bad query must not stop the build
             log.warning("search failed for %r: %s", term[:50], exc)
             hits = []
@@ -412,6 +428,12 @@ def main() -> None:
     p.add_argument("--topk", type=int, default=10)
     p.add_argument("--model", default="mlang_minilm")
     p.add_argument("--base-url", default="https://api.opensearch.nexavion.com")
+    p.add_argument("--ui-locale", default=None,
+                   help="Force one locale for every query. Default: each query's own "
+                        "detected language, which is what the platform would send.")
+    p.add_argument("--no-locale", action="store_true",
+                   help="Send no locale at all. Reproduces the un-localised behaviour; "
+                        "expect far fewer results for non-English queries.")
     add_env(p)
     p.set_defaults(func=cmd_sheet)
 
