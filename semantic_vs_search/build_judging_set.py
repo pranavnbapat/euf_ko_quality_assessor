@@ -348,9 +348,21 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--env", nargs="*", default=default_env,
-                        help="One or more .env files to read credentials from")
+    env_help = "One or more .env files to read credentials from"
+    parser.add_argument("--env", action="append", default=None,
+                        help=env_help + " (repeat the flag for several)")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    def add_env(p):
+        """Accept --env on the subcommand too.
+
+        argparse only honours a parent-parser option before the subcommand, and
+        the natural spelling puts it after. Declaring it in both places makes
+        either order work; `action="append"` keeps it from consuming the
+        subcommand name.
+        """
+        p.add_argument("--env", action="append", default=None, help=env_help)
+        return p
 
     p = sub.add_parser("export", help="Sample real queries from the ClickHouse search log")
     p.add_argument("--out", default="real_queries.json")
@@ -361,6 +373,7 @@ def main() -> None:
     p.add_argument("--min-chars", type=int, default=3)
     p.add_argument("--max-chars", type=int, default=120)
     p.add_argument("--seed", type=int, default=13)
+    add_env(p)
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("sheet", help="Run the queries and write a judging spreadsheet")
@@ -369,14 +382,19 @@ def main() -> None:
     p.add_argument("--topk", type=int, default=10)
     p.add_argument("--model", default="mlang_minilm")
     p.add_argument("--base-url", default="https://api.opensearch.nexavion.com")
+    add_env(p)
     p.set_defaults(func=cmd_sheet)
 
     p = sub.add_parser("convert", help="Turn a graded spreadsheet into judgments JSON")
     p.add_argument("--sheet", default="judging.xlsx")
     p.add_argument("--out", default="judgments.json")
+    add_env(p)
     p.set_defaults(func=cmd_convert)
 
     args = parser.parse_args()
+    # A subcommand --env wins; otherwise fall back to the parent's default.
+    if not getattr(args, "env", None):
+        args.env = default_env
     args.func(args)
 
 
