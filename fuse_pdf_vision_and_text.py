@@ -31,7 +31,13 @@ from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
-DEFAULT_VLLM_BASE_URL = "https://tld3x82ya8trj4-8000.proxy.runpod.net/v1"
+# Retired RunPod pod; configuration now comes from the environment.
+# See USING_LLMS.md for the Scaleway endpoint and its quirks.
+DEFAULT_VLLM_BASE_URL = (
+    os.environ.get("LLM_URL")
+    or os.environ.get("VLLM_URL")
+    or "http://localhost:8000/v1"
+)
 DEFAULT_MODEL = "qwen3-30b-a3b-awq"
 
 

@@ -247,27 +247,54 @@ class LLMClient:
         )
 
 
+# This repository names its LLM settings LLM_*; other services in the workspace
+# use VLLM_*. Both are accepted, LLM_* first, so a script can read this repo's
+# .env or borrow another service's without changes.
+URL_KEYS = ("LLM_URL", "VLLM_URL")
+MODEL_KEYS = ("LLM_MODEL", "VLLM_MODEL")
+KEY_KEYS = ("LLM_API_KEY", "VLLM_API_KEY")
+EFFORT_KEYS = ("LLM_REASONING_EFFORT",)
+
+
+def first_present(values: dict[str, str], names: Iterable[str]) -> str | None:
+    for name in names:
+        if values.get(name):
+            return values[name]
+    return None
+
+
 def build_client_from_env(
     env_paths: Iterable[str],
     cache_dir: str,
-    url_key: str = "VLLM_URL",
-    model_key: str = "VLLM_MODEL",
-    key_key: str = "VLLM_API_KEY",
-    effort_key: str = "LLM_REASONING_EFFORT",
+    url_keys: Iterable[str] = URL_KEYS,
+    model_keys: Iterable[str] = MODEL_KEYS,
+    key_keys: Iterable[str] = KEY_KEYS,
+    effort_keys: Iterable[str] = EFFORT_KEYS,
     overrides: dict[str, str] | None = None,
 ) -> LLMClient:
-    """First .env that carries a usable endpoint wins."""
+    """Build a client from the first .env that carries a usable endpoint.
+
+    Values are merged across the given files, earliest file winning, and the
+    real environment fills any remaining gap - which is what makes this work
+    inside a container, where the settings arrive as environment variables and
+    no .env file is present.
+    """
     merged: dict[str, str] = {}
     for path in env_paths:
         for key, value in load_env_file(path).items():
             merged.setdefault(key, value)
+    for name in (*url_keys, *model_keys, *key_keys, *effort_keys):
+        if not merged.get(name) and os.getenv(name):
+            merged[name] = os.environ[name]
     merged.update({k: v for k, v in (overrides or {}).items() if v})
 
-    url, model, key = merged.get(url_key), merged.get(model_key), merged.get(key_key, "")
+    url = first_present(merged, url_keys)
+    model = first_present(merged, model_keys)
+    key = first_present(merged, key_keys) or ""
     if not url or not model:
         raise RuntimeError(
-            f"No LLM endpoint configured: set {url_key} and {model_key} in one of "
-            + ", ".join(env_paths)
+            "No LLM endpoint configured. Set "
+            f"{url_keys[0]} and {model_keys[0]} in one of: " + ", ".join(env_paths)
         )
-    effort = (merged.get(effort_key) or "").strip() or None
+    effort = (first_present(merged, effort_keys) or "").strip() or None
     return LLMClient(url, key, model, cache_dir, reasoning_effort=effort)

@@ -42,7 +42,8 @@ import sys
 from collections import Counter, defaultdict
 from typing import Any
 
-from llm_client import LLMClient, build_client_from_env, load_env_file
+from llm_client import (EFFORT_KEYS, KEY_KEYS, URL_KEYS, LLMClient,
+                        build_client_from_env, first_present, load_env_file)
 
 logging.basicConfig(level=os.getenv("LOGLEVEL", "INFO"),
                     format="%(asctime)s | %(levelname)s | %(message)s")
@@ -118,9 +119,9 @@ def build_panel(env_paths: list[str], cache_dir: str, models: list[str]) -> list
     for path in env_paths:
         for key, value in load_env_file(path).items():
             merged.setdefault(key, value)
-    url = merged.get("VLLM_URL") or merged.get("LLM_URL")
-    key = merged.get("VLLM_API_KEY") or merged.get("LLM_API_KEY") or ""
-    effort = (merged.get("LLM_REASONING_EFFORT") or "").strip() or None
+    url = first_present(merged, URL_KEYS)
+    key = first_present(merged, KEY_KEYS) or ""
+    effort = (first_present(merged, EFFORT_KEYS) or "").strip() or None
     if not url:
         raise RuntimeError("No LLM endpoint configured in " + ", ".join(env_paths))
     return [LLMClient(url, key, model.strip(), cache_dir, reasoning_effort=effort)

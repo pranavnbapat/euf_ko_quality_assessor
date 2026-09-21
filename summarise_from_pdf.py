@@ -39,7 +39,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # Configuration defaults
 # -----------------------------
 
-DEFAULT_VLLM_BASE_URL = "https://tld3x82ya8trj4-8000.proxy.runpod.net/"
+# The RunPod pods this used to point at are retired and their proxy URLs 403.
+# Configuration now comes from the environment (LLM_URL, or VLLM_URL when
+# borrowing another service's .env); see USING_LLMS.md.
+DEFAULT_VLLM_BASE_URL = (
+    os.environ.get("LLM_URL")
+    or os.environ.get("VLLM_URL")
+    or "http://localhost:8000/v1"
+)
 DEFAULT_MODEL = "internvl3_5-14b"
 DEFAULT_PDF_URL_FIELD = "@id"
 
@@ -605,7 +612,9 @@ def main() -> None:
     # vLLM requires an API key header for OpenAI client, but it can be a dummy value.
     client = OpenAI(
         base_url=args.vllm_base_url,
-        api_key=os.environ.get("VLLM_API_KEY", "local-vllm"),
+        api_key=(os.environ.get("LLM_API_KEY")
+                 or os.environ.get("VLLM_API_KEY")
+                 or "local-vllm"),
     )
 
     total_t0 = time.perf_counter()
