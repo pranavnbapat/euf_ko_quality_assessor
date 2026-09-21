@@ -81,6 +81,10 @@ assess_ko_quality/anchors/nalt/nalt_anchor_texts.jsonl
 assess_ko_quality/anchors/centroids/agri_anchor_centroid.npy
 assess_ko_quality/anchors/centroids/agri_anchor_centroid.meta.json
 
+# Local operational notes: names the Scaleway project id and endpoint layout,
+# so it stays out of the repository even though *.md already covers it.
+USING_LLMS.md
+
 # Ignore Markdown by default; allow curated repository documentation
 *.md
 !README_fuse_pdf_visoin_and_text.md
