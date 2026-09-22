@@ -19,7 +19,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Set, Tuple
 
-from quality_text_utils import tokens, jaccard, count_urls, count_all_caps_runs, _STOP_EN
+from .text_utils import tokens, jaccard, count_urls, count_all_caps_runs, _STOP_EN
 
 
 # ============================================================================

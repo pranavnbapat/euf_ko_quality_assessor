@@ -1,10 +1,12 @@
+> **PARTLY SUPERSEDED.** The anchor build process described here is still how `anchors/` is produced, but the centroid it feeds is no longer used for scoring. Measured on a 678-item labelled set, centroid similarity separated in-scope from off-scope content at AUC 0.647; the classifier that replaced it reaches 1.000. See [`../METHODS.md`](../METHODS.md) section 1 and `../stages/gate.py`.
+
 # Domain Anchors System
 
 ## Overview
 
 The `anchors/` folder contains domain anchor texts derived from agricultural thesauri and related controlled vocabularies. These anchors are embedded offline and averaged into a domain centroid vector.
 
-At runtime, the centroid is loaded by [quality_domain_kc.py](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/assess_ko_quality/quality_domain_kc.py) and used by [ko_quality_assessor_kc.py](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/assess_ko_quality/ko_quality_assessor_kc.py) to score how agriculturally relevant a KO is.
+At runtime, the centroid is loaded by [quality_domain_kc.py](quality_domain_kc.py) and used by [ko_quality_assessor_kc.py](ko_quality_assessor_kc.py) to score how agriculturally relevant a KO is.
 
 The runtime score is embedding-based. It is a domain-relevance proxy, not a classifier.
 
@@ -39,8 +41,8 @@ The centroid metadata is important because runtime code checks model compatibili
 
 Current runtime code path:
 
-- [ko_quality_assessor_kc.py](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/assess_ko_quality/ko_quality_assessor_kc.py)
-- [quality_domain_kc.py](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/assess_ko_quality/quality_domain_kc.py)
+- [ko_quality_assessor_kc.py](ko_quality_assessor_kc.py)
+- [quality_domain_kc.py](quality_domain_kc.py)
 
 Runtime behavior:
 
@@ -61,7 +63,7 @@ Current default runtime model in code:
 
 - `AGRI_EMB_MODEL_NAME=all-mpnet-base-v2`
 
-The metadata check happens in [quality_domain_kc.py](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/assess_ko_quality/quality_domain_kc.py).
+The metadata check happens in [quality_domain_kc.py](quality_domain_kc.py).
 
 ### Do not rely on a fixed embedding dimension in docs
 
@@ -88,7 +90,7 @@ Current threshold table in code:
 - similarity `> 0.00` -> `1`
 - similarity `== 0.00` -> `0`
 
-The exact output column names come from [quality_domain_kc.py](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/assess_ko_quality/quality_domain_kc.py), so that file should be treated as the source of truth.
+The exact output column names come from [quality_domain_kc.py](quality_domain_kc.py), so that file should be treated as the source of truth.
 
 ## Environment Variables
 

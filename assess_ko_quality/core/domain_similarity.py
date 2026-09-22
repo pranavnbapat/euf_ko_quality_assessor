@@ -177,19 +177,27 @@ def load_domain_centroid(path: str) -> None:
     # --- Model compatibility check (name only, from metadata) ---
     meta_path = p.with_suffix(".meta.json")
     if meta_path.exists():
+        mismatch = None
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             centroid_model = (meta.get("embedding_model") or "").strip()
             runtime_model = (AGRI_EMB_MODEL_NAME or "").strip()
             if centroid_model and runtime_model and centroid_model != runtime_model:
-                raise ValueError(
-                    "Embedding model mismatch:\n"
-                    f"  centroid built with: {centroid_model}\n"
-                    f"  runtime AGRI_EMB_MODEL_NAME: {runtime_model}\n"
-                    "Fix: rebuild centroid with the runtime model, or set AGRI_EMB_MODEL_NAME to match."
-                )
+                mismatch = (centroid_model, runtime_model)
         except Exception as e:
+            # Unreadable or malformed metadata is advisory - it tells us nothing
+            # either way, so it stays a warning.
             print(f"[DOMAIN] Warning: could not validate centroid meta file {meta_path}: {e}")
+
+        # A mismatch we actually detected is fatal. Raised outside the try so the
+        # except above cannot catch it and downgrade it back to a warning.
+        if mismatch is not None:
+            raise ValueError(
+                "Embedding model mismatch:\n"
+                f"  centroid built with: {mismatch[0]}\n"
+                f"  runtime AGRI_EMB_MODEL_NAME: {mismatch[1]}\n"
+                "Fix: rebuild centroid with the runtime model, or set AGRI_EMB_MODEL_NAME to match."
+            )
     else:
         print(f"[DOMAIN] Warning: centroid meta file not found (expected {meta_path}). Skipping model check.")
 

@@ -19,7 +19,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from quality_text_utils import tokens, sentence_lengths, count_urls, count_non_ascii, count_all_caps_runs
+from .text_utils import tokens, sentence_lengths, count_urls, count_non_ascii, count_all_caps_runs
 
 
 # ============================================================================

@@ -8,7 +8,7 @@ This folder contains an ML-oriented framework for KO quality assessment. It is i
 - model training infrastructure
 - validation and calibration components
 - SHAP-based explainability hooks
-- a main API in [assessor_scientific.py](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/assess_ko_quality/scientific_quality/assessor_scientific.py)
+- a main API in [assessor_scientific.py](assessor_scientific.py)
 
 ## What It Does Not Guarantee By Itself
 
@@ -36,7 +36,7 @@ Without that, this folder should be understood as infrastructure for scientific 
 
 ## Main Entry Point
 
-The main API is [assessor_scientific.py](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/assess_ko_quality/scientific_quality/assessor_scientific.py).
+The main API is [assessor_scientific.py](assessor_scientific.py).
 
 It exposes:
 

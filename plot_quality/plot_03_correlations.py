@@ -3,22 +3,49 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from utils import COLS, load_quality_table, pick_numeric, savefig, set_theme, TOTAL_COL
+import pandas as pd
+
+from utils import COLS, latest_tsv, load_quality_table, pick_numeric, savefig, set_theme, TOTAL_COL
 
 
-DATA_PATH = "../assess_ko_quality/output/quality_check_20260109_202033.tsv"
+# None -> newest TSV in data/. Set a path to pin a specific run.
+DATA_PATH = None
 SHEET_NAME = 0
+
+
+def add_raw_fractions(df: pd.DataFrame) -> list[str]:
+    """
+    Add `<Pillar>_Total_frac`: each pillar's raw total as a fraction of its own max.
+
+    Semantic_Total_Raw is scored out of 20 or 25 depending on whether the MNLI
+    component ran for that KO, so correlating the raw column mixes two scales.
+    Dividing by Semantic_Total_Max puts every row back on one scale. The other three
+    pillars have a fixed max of 20, so this is a pure linear rescale for them and
+    leaves their correlations numerically identical.
+    """
+    added: list[str] = []
+    for pillar in ("Structural", "Semantic", "Domain", "Functional"):
+        raw_col = f"{pillar}_Total_Raw"
+        if raw_col not in df.columns:
+            continue
+        max_col = f"{pillar}_Total_Max"
+        # Older TSVs predate the *_Total_Max columns; every pillar was out of 20 then.
+        denom = pd.to_numeric(df[max_col], errors="coerce") if max_col in df.columns else 20.0
+        frac_col = f"{pillar}_Total_frac"
+        df[frac_col] = pd.to_numeric(df[raw_col], errors="coerce") / denom
+        added.append(frac_col)
+    return added
 
 
 def main() -> None:
     set_theme()
-    df = load_quality_table(DATA_PATH, sheet_name=SHEET_NAME)
+    data_path = DATA_PATH if DATA_PATH is not None else latest_tsv()
+    df = load_quality_table(data_path, sheet_name=SHEET_NAME)
 
-    interesting_cols = list(COLS.pillar_cols) + [
-        "Structural_Total_Raw",
-        "Semantic_Total_Raw",
-        "Domain_Total_Raw",
-        "Functional_Total_Raw",
+    frac_cols = add_raw_fractions(df)
+
+    interesting_cols = list(COLS.pillar_cols) + frac_cols + [
+        "Semantic_consistency_mnli",
         "Domain_term_density",
         "Domain_similarity_title",
         "Domain_similarity_desc",

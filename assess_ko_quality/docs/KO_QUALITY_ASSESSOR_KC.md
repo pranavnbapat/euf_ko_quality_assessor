@@ -1,3 +1,7 @@
+> **SUPERSEDED.** This describes the four-pillar assessor (`legacy/ko_quality_assessor_kc.py`) and its 30/35/25/10 weighting, which is no longer how KO quality is scored. That design was measured against the 2024 human review and agreed with reviewers at rho 0.174; given free choice of weights it scored -0.170, below chance. It also rated a well-written article about Bach above every real agricultural KO in the same run.
+>
+> Current method: [`../METHODS.md`](../METHODS.md). Current overview: [`../README.md`](../README.md). Kept for history; do not follow it.
+
 # KO Quality Assessor KC
 
 `ko_quality_assessor_kc.py` performs four-pillar Knowledge Object (KO) quality assessment and writes a TSV report.

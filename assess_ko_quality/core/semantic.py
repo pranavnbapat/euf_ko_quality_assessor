@@ -27,7 +27,7 @@ import spacy
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, PreTrainedTokenizerBase
 
-from quality_text_utils import tokens, strip_stops, unique_ratio, jaccard, count_non_ascii, sentence_lengths
+from .text_utils import tokens, strip_stops, unique_ratio, mtld, jaccard, count_non_ascii, sentence_lengths
 
 
 # ============================================================================
@@ -57,12 +57,22 @@ USEFULNESS_THRESHOLDS = [
     (float(os.environ.get("SEM_USEFULNESS_T2", "0.2")), 2),
 ]
 
-# Info density thresholds (unique ratio without stopwords)
-INFO_DENSITY_THRESHOLDS = [
-    (float(os.environ.get("SEM_DENSITY_T5", "0.38")), 5),
-    (float(os.environ.get("SEM_DENSITY_T4", "0.30")), 4),
-    (float(os.environ.get("SEM_DENSITY_T3", "0.24")), 3),
-    (float(os.environ.get("SEM_DENSITY_T2", "0.18")), 2),
+# Info density thresholds, on MTLD of the stopword-stripped content.
+#
+# This replaced a plain type-token ratio. TTR falls mechanically as texts get longer
+# (rho = -0.93 against log length on this corpus), so it scored failed extractions 5/5
+# and full documents lower: 93.7% of a 3,000-KO sample scored 5/5, i.e. the metric was
+# almost constant. Against the 2024 human review, TTR correlated -0.29 with reviewer
+# judgement while MTLD correlates +0.47 (+0.30 partialling out length).
+#
+# Cut points are quintiles of MTLD over 3,000 KOs sampled (seed 42) from the June-2026
+# export, except the bottom one: MTLD 20 is the 35th percentile and separates real
+# documents from near-empty extractions. Re-derive with validate_metrics.py --calibrate.
+MTLD_THRESHOLDS = [
+    (float(os.environ.get("SEM_MTLD_T5", "193")), 5),   # p80
+    (float(os.environ.get("SEM_MTLD_T4", "116")), 4),   # p60
+    (float(os.environ.get("SEM_MTLD_T3", "59")), 3),    # p40
+    (float(os.environ.get("SEM_MTLD_T2", "20")), 2),    # p35, extraction-failure floor
 ]
 
 # Consistency thresholds (Jaccard similarity)
@@ -221,6 +231,7 @@ class SemanticMetrics:
     avg_sentence_len: float
     non_ascii_count: int
     unique_ratio: float
+    mtld: float
     jaccard_sim: float
 
 
@@ -330,6 +341,7 @@ def _compute_metrics(
         meta_tokens=m_toks, sentence_lengths=s_lens,
         avg_sentence_len=avg_slen, non_ascii_count=count_non_ascii(full),
         unique_ratio=unique_ratio(c_toks_nostop) if c_toks_nostop else 0.0,
+        mtld=mtld(c_toks_nostop) if c_toks_nostop else 0.0,
         jaccard_sim=jaccard(m_toks, c_toks),
     )
 
@@ -393,20 +405,26 @@ def _score_usefulness(metrics: SemanticMetrics) -> Tuple[int, Dict[str, Any]]:
 
 
 def _score_info_density(metrics: SemanticMetrics) -> Tuple[int, Dict[str, Any]]:
-    """Score information density based on lexical diversity."""
-    ur = metrics.unique_ratio
-    
+    """
+    Score information density from MTLD (length-robust lexical diversity).
+
+    The raw type-token ratio is still reported as a diagnostic, but it no longer
+    drives the score - see MTLD_THRESHOLDS for why.
+    """
+    m = metrics.mtld
+
     score = 0
-    for threshold, sc in INFO_DENSITY_THRESHOLDS:
-        if ur >= threshold:
+    for threshold, sc in MTLD_THRESHOLDS:
+        if m >= threshold:
             score = sc
             break
-    
-    if ur > 0 and score == 0:
+
+    if m > 0 and score == 0:
         score = 1
-    
+
     return score, {
-        "info_density_unique_ratio": round(ur, 4),
+        "info_density_mtld": round(m, 2),
+        "info_density_unique_ratio": round(metrics.unique_ratio, 4),  # diagnostic only
         "info_density_content_tokens": len(metrics.content_tokens),
         "info_density_content_tokens_nostop": len(metrics.content_tokens_nostop),
     }
@@ -505,6 +523,27 @@ def _mnli_probs_to_score(p_ent: float, p_neu: float, p_con: float) -> float:
     return 1.0
 
 
+def _mnli_component(mnli: Optional[Dict[str, Any]]) -> Optional[float]:
+    """
+    Extract the 0-5 MNLI consistency score from a semantic_mnli_consistency() result,
+    or None when the MNLI pass scored no field at all.
+
+    None means "leave MNLI out of the pillar", NOT "score it 0". MNLI is skipped for
+    non-English KOs and for KOs with no content; scoring those 0 would penalise them
+    for a check that never ran.
+    """
+    if not mnli:
+        return None
+    if mnli.get("Semantic_mnli_skipped"):
+        return None
+    if not mnli.get("Semantic_mnli_fields_scored"):
+        return None
+    try:
+        return float(mnli.get("Semantic_consistency_mnli", 0.0))
+    except (TypeError, ValueError):
+        return None
+
+
 # ============================================================================
 # MAIN PUBLIC FUNCTIONS
 # ============================================================================
@@ -515,8 +554,16 @@ def semantic_scores(
     desc: Optional[str] = None,
     content: Optional[str] = None,
     keywords: Optional[List[str]] = None,
+    mnli: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Compute Semantic sub-scores with improved efficiency and diagnostics."""
+    """
+    Compute Semantic sub-scores with improved efficiency and diagnostics.
+
+    `mnli` is the dict returned by semantic_mnli_consistency(). When it is supplied
+    and the MNLI pass actually scored at least one metadata field, MNLI consistency
+    becomes a fifth pillar component; otherwise the pillar is the four lexical
+    components as before. Either way the pillar is reported on 0-25.
+    """
     _validate_config()
     
     metrics = _compute_metrics(title, subtitle, desc, content, keywords)
@@ -526,15 +573,28 @@ def semantic_scores(
     density_score, density_diag = _score_info_density(metrics)
     consistency_score, consistency_diag = _score_consistency(metrics)
     
-    sem_raw = clarity_score + usefulness_score + density_score + consistency_score
-    sem_scaled = min(25, round(sem_raw * 25.0 / 20.0))
+    components = [clarity_score, usefulness_score, density_score, consistency_score]
+    
+    # MNLI consistency joins the pillar as a fifth component when it ran. Skipped KOs
+    # (non-English, or no content) keep the original four-component scale rather than
+    # taking a zero for a check that never happened.
+    mnli_score = _mnli_component(mnli)
+    if mnli_score is not None:
+        components.append(mnli_score)
+    
+    sem_raw = sum(components)
+    sem_max = 5.0 * len(components)
+    sem_scaled = min(25, round(sem_raw * 25.0 / sem_max))
     
     return {
         "Semantic_clarity": clarity_score,
         "Semantic_usefulness": usefulness_score,
         "Semantic_information_density": density_score,
         "Semantic_consistency": consistency_score,
-        "Semantic_Total_Raw": sem_raw,
+        "Semantic_consistency_mnli_used": mnli_score if mnli_score is not None else "",
+        "Semantic_Total_Raw": round(sem_raw, 2),
+        "Semantic_Total_Max": int(sem_max),
+        "Semantic_components_used": len(components),
         "Semantic_Score_0_25": sem_scaled,
         **clarity_diag,
         **usefulness_diag,
@@ -567,6 +627,7 @@ def semantic_mnli_consistency(
             "Semantic_mnli_title_label": "",
             "Semantic_mnli_desc_label": "",
             "Semantic_mnli_subtitle_label": "",
+            "Semantic_mnli_fields_scored": 0,
             "Semantic_mnli_skipped": True,
             "Semantic_mnli_skip_reason": "non_english_or_no_content" if not c else "non_english",
         }
@@ -606,10 +667,13 @@ def semantic_mnli_consistency(
             results[f"Semantic_mnli_{field_name}_p_neutral"] = 0.0
             results[f"Semantic_mnli_{field_name}_p_contra"] = 0.0
     
-    non_zero = [s for s in scores if s > 0]
-    combined = sum(non_zero) / len(non_zero) if non_zero else 0.0
+    # Average over every field that was actually scored. Filtering on `s > 0` here
+    # dropped contradictions, which map to exactly 0.0 - i.e. it discarded the
+    # strongest available evidence that the metadata and the content disagree.
+    combined = sum(scores) / len(scores) if scores else 0.0
     
     results["Semantic_consistency_mnli"] = round(combined, 2)
+    results["Semantic_mnli_fields_scored"] = len(scores)
     results["Semantic_mnli_skipped"] = False
     results["Semantic_mnli_skip_reason"] = ""
     

@@ -1,17 +1,58 @@
-# assess_ko_quality/compare_human_vs_auto.py
+# assess_ko_quality/manual_vs_automatic_review.py
+"""
+Validate the automatic KO quality scores against the 2024 human review.
+
+Reports, for the KOs that appear in both:
+  - inter-rater agreement between the human reviewers (the ceiling any automatic
+    scorer can be expected to reach)
+  - correlation of each automatic pillar, and the total, against the human scores
+
+Usage:
+    python manual_vs_automatic_review.py                       # newest TSV in ./output
+    python manual_vs_automatic_review.py --auto path/to.tsv
+    python manual_vs_automatic_review.py --include-collating   # add the consolidated sheet
+"""
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 
 HUMAN_XLSX = Path("2024_KOs for assessment all collating.xlsx")
-AUTO_TSV = Path("output/quality_check_20260109_201910.tsv")
 OUT_XLSX = Path("human_vs_auto_comparison.xlsx")
+
+# 'collating' is a separate consolidated pass over the same KOs, not a per-reviewer
+# sheet. It correlates with the reviewer mean at about r=0.7 but is not identical, so
+# folding it in silently would change the ground truth. Opt in with --include-collating.
+CONSOLIDATED_SHEETS = {"collating"}
+
+
+# Emitted by ko_quality_assessor_kc.py and by nothing else, so it distinguishes a
+# four-pillar TSV from the content-diagnostics TSVs that share the same output folder.
+REQUIRED_AUTO_COL = "Total_Quality_weighted_0_100"
+
+
+def latest_auto_tsv(output_dir: Path = Path("output")) -> Path:
+    """Newest four-pillar assessor TSV in output_dir."""
+    candidates = sorted(output_dir.glob("*.tsv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for f in candidates:
+        try:
+            header = pd.read_csv(f, sep="\t", nrows=0).columns
+        except Exception:
+            continue
+        if REQUIRED_AUTO_COL in header:
+            return f
+    raise FileNotFoundError(
+        f"No four-pillar assessor TSV (one with a {REQUIRED_AUTO_COL!r} column) in "
+        f"{output_dir.resolve()}; found {len(candidates)} other TSV(s). "
+        "Run ko_quality_assessor_kc.py first, or pass --auto."
+    )
 
 
 # -----------------------------
@@ -168,7 +209,15 @@ def parse_reviewer_sheet(sheet_name: str, df: pd.DataFrame) -> pd.DataFrame:
     # Search within the first few rows, because some sheets shift the "question row"
     SEARCH_ROWS = min(15, df.shape[0])
 
-    for r in range(SEARCH_ROWS):
+    # These workbooks carry "_id" as a real column NAME with the ids in the rows
+    # beneath it, so check the header before scanning cell values.
+    for c in df.columns:
+        if isinstance(c, str) and c.strip().lower() in {"_id", "id"}:
+            id_col = c
+            id_row = None  # ids start in the data rows, not below a label cell
+            break
+
+    for r in range(SEARCH_ROWS) if id_col is None else []:
         for c in df.columns:
             v = df.loc[r, c]
             if isinstance(v, str) and v.strip().lower() in {"_id", "id"}:
@@ -294,27 +343,122 @@ def parse_reviewer_sheet(sheet_name: str, df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-def load_all_human_reviews(xlsx_path: Path) -> pd.DataFrame:
+def load_all_human_reviews(
+    xlsx_path: Path,
+    include_collating: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Returns (per_review_rows, per_ko_consensus).
+
+    The per-review frame keeps one row per (KO, reviewer) so inter-rater agreement can
+    be measured; the consensus frame averages those rows per KO.
+    """
     xls = pd.ExcelFile(xlsx_path)
     all_rows = []
     for sheet in xls.sheet_names:
         df = pd.read_excel(xlsx_path, sheet_name=sheet)
-        if is_reviewer_sheet(df):
-            parsed = parse_reviewer_sheet(sheet, df)
-            print(f"[human] sheet={sheet} rows={len(parsed)}")
-            all_rows.append(parsed)
+        if not is_reviewer_sheet(df):
+            continue
+        if sheet in CONSOLIDATED_SHEETS and not include_collating:
+            print(f"[human] sheet={sheet} SKIPPED (consolidated; use --include-collating)")
+            continue
+        parsed = parse_reviewer_sheet(sheet, df)
+        print(f"[human] sheet={sheet} rows={len(parsed)}")
+        all_rows.append(parsed)
 
     if not all_rows:
         raise RuntimeError("No reviewer sheets detected. Check sheet formatting or heuristics.")
 
     long_df = pd.concat(all_rows, ignore_index=True)
 
-    # Aggregate across reviewers per KO
     agg_cols = [c for c in long_df.columns if c not in {"reviewer"}]
-    # For binaries/dimension scores: mean; for recommend: mean (you can change to median if you prefer)
     human_agg = long_df.groupby("ko_id", as_index=False)[agg_cols].mean(numeric_only=True)
+    human_agg["n_reviewers"] = long_df.groupby("ko_id").size().reindex(human_agg["ko_id"]).to_numpy()
 
-    return human_agg
+    return long_df, human_agg
+
+
+# -----------------------------
+# Inter-rater agreement (the ceiling for any automatic scorer)
+# -----------------------------
+HUMAN_DIMS = [
+    "human_findability_0_1",
+    "human_clarity_0_1",
+    "human_comprehensibility_0_1",
+    "human_usability_0_1",
+    "human_recommend_0_1",
+]
+
+
+def inter_rater_agreement(long_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For KOs reviewed by 2+ people, correlate reviewer 1 against reviewer 2.
+
+    This is the headline context for everything below: an automatic scorer cannot be
+    expected to track "human judgment" more closely than two humans track each other.
+    Reviewer order is the sheet order, which is arbitrary but consistent.
+    """
+    rows = []
+    two_plus = long_df.groupby("ko_id").filter(lambda g: len(g) >= 2)
+    for dim in HUMAN_DIMS:
+        if dim not in two_plus.columns:
+            continue
+        first, second = [], []
+        for _, g in two_plus.groupby("ko_id"):
+            vals = g[dim].dropna().to_numpy()
+            if len(vals) >= 2:
+                first.append(vals[0])
+                second.append(vals[1])
+        n = len(first)
+        if n < 3:
+            rows.append({"dimension": dim, "n_KOs": n, "pearson": np.nan,
+                         "spearman": np.nan, "exact_agreement_pct": np.nan})
+            continue
+        a, b = np.array(first), np.array(second)
+        with np.errstate(invalid="ignore"):
+            pear = stats.pearsonr(a, b)[0] if a.std() and b.std() else np.nan
+            spear = stats.spearmanr(a, b)[0] if a.std() and b.std() else np.nan
+        rows.append({
+            "dimension": dim,
+            "n_KOs": n,
+            "pearson": pear,
+            "spearman": spear,
+            "exact_agreement_pct": float((a == b).mean()) * 100.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def pillar_correlations(merged: pd.DataFrame) -> pd.DataFrame:
+    """
+    Correlate every automatic pillar and the overall total against every human
+    dimension. This is deliberately broader than the hand-built proxy mapping: if a
+    pillar tracks human judgment at all, it shows up here without being told where.
+    """
+    auto_cols = [c for c in [
+        "auto_structural_0_1", "auto_semantic_0_1", "auto_functional_0_1",
+        "auto_domain_0_1", "auto_total_weighted_0_1",
+    ] if c in merged.columns]
+
+    rows = []
+    for h in HUMAN_DIMS:
+        if h not in merged.columns:
+            continue
+        for a in auto_cols:
+            x = pd.to_numeric(merged[h], errors="coerce")
+            y = pd.to_numeric(merged[a], errors="coerce")
+            ok = x.notna() & y.notna()
+            n = int(ok.sum())
+            if n < 3 or x[ok].std() == 0 or y[ok].std() == 0:
+                rows.append({"human_metric": h, "auto_metric": a, "n": n,
+                             "pearson": np.nan, "spearman": np.nan, "p_spearman": np.nan})
+                continue
+            pear = stats.pearsonr(x[ok], y[ok])
+            spear = stats.spearmanr(x[ok], y[ok])
+            rows.append({
+                "human_metric": h, "auto_metric": a, "n": n,
+                "pearson": pear[0], "spearman": spear[0], "p_spearman": spear[1],
+            })
+    return pd.DataFrame(rows)
 
 
 # -----------------------------
@@ -386,10 +530,12 @@ def compute_auto_dimension_scores(auto_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Weak proxies / placeholders (flag these clearly in outputs)
+    # Domain_term_density and Domain_consistency are 0-5 sub-scores, so they have to be
+    # normalised before they can sit in a column named *_0_1.
     df["auto_credibility_proxy_0_1"] = np.nanmean(
         np.vstack([
-            df["Domain_term_density"].apply(safe_float).to_numpy(),
-            df["Domain_consistency"].apply(safe_float).to_numpy(),
+            df["Domain_term_density"].apply(normalise_0_5_to_0_1).to_numpy(),
+            df["Domain_consistency"].apply(normalise_0_5_to_0_1).to_numpy(),
         ]),
         axis=0
     )
@@ -403,13 +549,44 @@ def compute_auto_dimension_scores(auto_df: pd.DataFrame) -> pd.DataFrame:
 # -----------------------------
 # Comparison / output
 # -----------------------------
-def main() -> None:
-    human = load_all_human_reviews(HUMAN_XLSX)
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--human", type=Path, default=HUMAN_XLSX, help="Human review workbook (.xlsx)")
+    ap.add_argument("--auto", type=Path, default=None,
+                    help="Assessor TSV. Default: newest in ./output")
+    ap.add_argument("--out", type=Path, default=OUT_XLSX, help="Output .xlsx")
+    ap.add_argument("--include-collating", action="store_true",
+                    help="Also treat the consolidated 'collating' sheet as a reviewer")
+    return ap.parse_args()
 
-    auto = pd.read_csv(AUTO_TSV, sep="\t", dtype=str)
+
+def main() -> None:
+    args = parse_args()
+    auto_path = args.auto if args.auto is not None else latest_auto_tsv()
+    print(f"[human] workbook: {args.human}")
+    print(f"[auto ] scores  : {auto_path}")
+
+    long_human, human = load_all_human_reviews(args.human, include_collating=args.include_collating)
+
+    auto = pd.read_csv(auto_path, sep="\t", dtype=str)
     auto = compute_auto_dimension_scores(auto)
 
     merged = human.merge(auto, left_on="ko_id", right_on="_orig_id", how="inner")
+
+    # Coverage has to be stated, not assumed: the review is from 2024 and KOs drop out
+    # of later exports, so the join is always a subset of what was reviewed.
+    print("\n=== Coverage ===")
+    print(f"  KOs human-reviewed      : {len(human)}")
+    print(f"  KOs in the assessor run : {len(auto)}")
+    print(f"  KOs in both (analysed)  : {len(merged)}")
+    missing = sorted(set(human['ko_id']) - set(auto['_orig_id'].astype(str)))
+    if missing:
+        print(f"  reviewed but not scored : {len(missing)}  e.g. {missing[:3]}")
+    if "n_reviewers" in merged.columns:
+        print(f"  reviewers per KO        : {merged['n_reviewers'].value_counts().sort_index().to_dict()}")
+
+    ceiling = inter_rater_agreement(long_human)
+    pillars = pillar_correlations(merged)
 
     # Correlations for dimension scores
     dim_pairs = [
@@ -453,12 +630,28 @@ def main() -> None:
 
     print_diagnostics(merged, corr_df, agree_df)
 
-    with pd.ExcelWriter(OUT_XLSX, engine="openpyxl") as w:
+    print("\n=== Inter-rater agreement (the ceiling for any automatic scorer) ===")
+    print(ceiling.round(3).to_string(index=False))
+
+    print("\n=== Every automatic pillar vs every human dimension ===")
+    piv = pillars.pivot(index="auto_metric", columns="human_metric", values="spearman")
+    print("Spearman:")
+    print(piv.round(3).to_string())
+    best = pillars.dropna(subset=["spearman"]).reindex(
+        pillars.dropna(subset=["spearman"])["spearman"].abs().sort_values(ascending=False).index
+    ).head(5)
+    print("\nStrongest associations:")
+    print(best.round(4).to_string(index=False))
+
+    with pd.ExcelWriter(args.out, engine="openpyxl") as w:
         merged.to_excel(w, index=False, sheet_name="merged_human_auto")
         corr_df.to_excel(w, index=False, sheet_name="dimension_correlations")
         agree_df.to_excel(w, index=False, sheet_name="threshold_agreement")
+        ceiling.to_excel(w, index=False, sheet_name="inter_rater_ceiling")
+        pillars.to_excel(w, index=False, sheet_name="pillar_correlations")
+        long_human.to_excel(w, index=False, sheet_name="human_per_review")
 
-    print(f"Wrote: {OUT_XLSX.resolve()}")
+    print(f"\nWrote: {args.out.resolve()}")
     print(f"Merged rows: {len(merged)} / Human KOs: {len(human)} / Auto KOs: {len(auto)}")
 
 

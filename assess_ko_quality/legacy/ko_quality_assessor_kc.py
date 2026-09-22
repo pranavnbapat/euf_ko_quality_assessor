@@ -21,6 +21,7 @@ Environment variables:
 # Quality = Structural + Semantic + Domain + Functional
 # Structural = length + completeness + noise + formatting
 # Semantic   = clarity + usefulness + information density + consistency
+#              (+ MNLI content<->metadata consistency, when it is not skipped)
 # Domain     = correct agricultural terminology and context (embedding-based)
 # Functional = works well for BM25, embeddings, hybrid search, RAG (proxies)
 
@@ -36,10 +37,10 @@ import pandas as pd
 from utils import _latest_json_file, ensure_directory, assert_readable_dir, _read_json_any, _unique_outfile
 
 from quality_text_utils import norm_text, detect_lang_safe, _ensure_str_list
-from quality_structural_kc import structural_scores
-from quality_semantic_kc import semantic_scores, semantic_mnli_consistency
-from quality_domain_kc import domain_scores, load_domain_centroid
-from quality_functional_kc import functional_scores
+from quality_structural import structural_scores
+from quality_semantic import semantic_scores, semantic_mnli_consistency
+from quality_domain import domain_scores, load_domain_centroid
+from quality_functional import functional_scores
 
 
 # ---------- Config: I/O ----------
@@ -91,11 +92,9 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
     # --- Compute all quality scores ---
     # Each returns comprehensive diagnostics beyond just the main scores
     struct = structural_scores(title, subtitle, desc, content, keywords)
-    sem = semantic_scores(title, subtitle, desc, content, keywords)
-    dom = domain_scores(title, desc, content, keywords)
-    func = functional_scores(title, desc, content, keywords)
 
-    # MNLI-based semantic consistency (content → title/desc/subtitle)
+    # MNLI-based semantic consistency (content → title/desc/subtitle).
+    # Computed before the semantic pillar because it feeds into it.
     mnli_sem = semantic_mnli_consistency(
         title=title,
         subtitle=subtitle,
@@ -103,6 +102,10 @@ def assess_ko(ko: Dict[str, Any]) -> Dict[str, Any]:
         content=content,
         lang_meta=lang_meta,
     )
+
+    sem = semantic_scores(title, subtitle, desc, content, keywords, mnli=mnli_sem)
+    dom = domain_scores(title, desc, content, keywords)
+    func = functional_scores(title, desc, content, keywords)
 
     # --- Aggregate scores ---
     # Unweighted total (legacy): 0–100 because 4 pillars × 25

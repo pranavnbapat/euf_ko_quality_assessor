@@ -143,6 +143,20 @@ def pick_numeric(df: pd.DataFrame, cols: Iterable[str]) -> pd.DataFrame:
     return sub
 
 
+def latest_tsv(data_dir: str | Path = "data") -> Path:
+    """
+    Return the most recently modified TSV in data_dir.
+
+    Scripts default to this instead of a hard-coded filename so they keep working
+    after a fresh assessor run drops a new TSV in.
+    """
+    data_path = Path(data_dir)
+    files = sorted(data_path.glob("*.tsv"), key=lambda p: p.stat().st_mtime)
+    if not files:
+        raise FileNotFoundError(f"No TSV files found in {data_path.resolve()}")
+    return files[-1]
+
+
 def discover_two_tsvs(data_dir: str | Path = "data") -> Tuple[Path, Path]:
     """
     Find exactly two TSV files in data_dir.

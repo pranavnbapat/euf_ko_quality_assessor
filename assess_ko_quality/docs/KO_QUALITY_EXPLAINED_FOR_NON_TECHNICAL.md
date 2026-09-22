@@ -1,3 +1,7 @@
+> **SUPERSEDED.** This explains the four-pillar score and its A/B/C/D grades, neither of which the pipeline produces any more. The Domain pillar described here could not distinguish agriculture from Bach or from gibberish, and is now a gate that runs before scoring rather than 10% of a weighted total.
+>
+> For a current plain-language guide see `../How_the_KO_quality_pipeline_works.docx`. Kept for history; do not follow it.
+
 # Understanding KO Quality Assessment (For Non-Technical Users)
 
 ## The Four Quality Pillars Explained
