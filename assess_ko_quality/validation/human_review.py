@@ -183,7 +183,11 @@ def is_reviewer_sheet(df: pd.DataFrame) -> bool:
     """
     Heuristic: reviewer sheets have the question text in row 0 around the 'Findability' block.
     """
-    if df.shape[0] < 3 or df.shape[1] < 50:
+    # Width is not what makes a sheet a review sheet. The 2024 originals carried ~60
+    # columns of internal bookkeeping; a batch generated with only the fields a reviewer
+    # needs is narrower and was being rejected outright. The content checks below are
+    # what actually identify the form.
+    if df.shape[0] < 3 or df.shape[1] < 15:
         return False
     # These sheets typically have "Findability" in the column header (as a column name),
     # and row 0 contains question text like "Title Clear and complete..."
