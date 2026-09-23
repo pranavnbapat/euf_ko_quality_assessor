@@ -1,12 +1,11 @@
 # assess_ko_quality/stages/compliance.py
 """
-Stage 1: compliance checks.
+Compliance: the platform's obligations, as a pass/fail checklist.
 
-These are requirements, not quality signals, so they are reported as a pass/fail
-checklist and deliberately kept OUT of the quality score. That separation is not
-stylistic: when metadata completeness was a scored component it correlated with
-reviewer judgement at -0.217 (p=0.039), the wrong direction, because a thorough record
-is not the same thing as good content. Completeness still matters - as an obligation.
+These are requirements, not quality signals (ISO/IEC 25012 treats compliance as its
+own characteristic), so they are reported next to the metadata score and never enter
+it. A record can satisfy every obligation and still describe its file badly, and the
+reverse; mixing the two would hide both.
 
 Nothing here is a fixed list.
 
@@ -23,7 +22,8 @@ Nothing here is a fixed list.
     So field roles are classified by an LLM from the field names and sample values, and
     only contributor-supplied fields become obligations. The classification is stored in
     the profile, so it is auditable and costs nothing to re-use.
-  - Staleness is a corpus percentile, not a number someone chose.
+  - Age is reported against a corpus percentile, never as a failure: an old document
+    is not a missed obligation.
 
 Without a profile the module still runs, checking only vocabulary conformance and
 whatever the caller passes in, rather than inventing requirements.
@@ -205,7 +205,7 @@ def classify_field_roles(
 
 def learn_profile(
     records: Iterable[Dict[str, Any]],
-    expected_at: float = 0.95,
+    expected_at: float = 1.0,
     stale_percentile: float = 0.05,
     cv_dir: Path = CV_DIR,
     classify_roles: bool = True,
@@ -214,8 +214,11 @@ def learn_profile(
     """
     Derive the checklist from a corpus instead of asserting it.
 
-    A field populated in at least `expected_at` of records is treated as expected: the
-    platform evidently requires it, whatever any spec says. The staleness cut-off is the
+    A field populated in at least `expected_at` of records is treated as expected. The
+    default is every record: the data model does not say which fields are mandatory,
+    but a field the upload form enforces is filled on 100% of records, while optional
+    fields (topics, locations, themes, creators, ...) are not. Optional fields are never
+    obligations - if present, fine; if absent, not a failure. The staleness cut-off is the
     `stale_percentile` quantile of completion years, so "stale" means old relative to
     this corpus rather than older than a number someone picked.
     """
@@ -336,7 +339,11 @@ def check(
             if stray:
                 drift[field] = stray
 
-    failed = sorted(k for k, v in evaluated.items() if not v and not k.startswith("cv_"))
+    # Age is reported, not failed: an old document is not a contributor missing an
+    # obligation, and age alone does not say the content is out of date (ISO 25012
+    # "currentness" concerns whether the data is current, which age only hints at).
+    failed = sorted(k for k, v in evaluated.items()
+                    if not v and not k.startswith("cv_") and k != "not_stale")
 
     return {
         "compliance_checks": checks,
@@ -346,6 +353,8 @@ def check(
         "compliance_vocab_drift": drift,
         "compliance_skipped": sorted(k for k, v in checks.items() if v is None),
         "compliance_status": "complete" if not failed else "incomplete",
+        "compliance_older_than_corpus_p5": (checks.get("not_stale") is False),
+        "compliance_year": year,
         "compliance_profile_used": bool(profile),
     }
 

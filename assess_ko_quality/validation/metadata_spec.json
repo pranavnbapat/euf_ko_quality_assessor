@@ -1,0 +1,104 @@
+{
+ "version": 7,
+ "_about": "Settings for the metadata score (stages/metadata_score.py). Every number here is either a platform rule, a published cut-off, or a model choice; each carries its provenance below. Values learned from the corpus are NOT stored here - they are computed from the export and cached.",
+ "fields": {
+  "title": {
+   "weight": 1.0,
+   "required": true,
+   "length": {
+    "max_chars_no_spaces": 150
+   }
+  },
+  "subtitle": {
+   "weight": 1.0,
+   "required": false,
+   "length": {}
+  },
+  "description": {
+   "weight": 1.0,
+   "required": true,
+   "length": {
+    "min_chars": 50,
+    "max_chars": 5000
+   },
+   "rich_text": true
+  },
+  "keywords": {
+   "weight": 1.0,
+   "required": true,
+   "length": {}
+  }
+ },
+ "pillars": {
+  "structural": 1.0,
+  "semantic": 1.0,
+  "functional": 1.0
+ },
+ "readability": {
+  "lix_full_score_at_or_below": 40,
+  "lix_zero_score_at_or_above": 60,
+  "min_words": 40
+ },
+ "models": {
+  "embedding": "intfloat/multilingual-e5-small",
+  "nli": "joeddav/xlm-roberta-large-xnli"
+ },
+ "reference": {
+  "min_chars": 200,
+  "max_chars": 100000,
+  "passage_chars": 2000,
+  "chunk_words": 120,
+  "max_chunks": 40,
+  "premises_per_hypothesis": 2,
+  "max_description_sentences": 8
+ },
+ "coverage": {
+  "key_terms": 10,
+  "null_terms": 300,
+  "null_percentile": 95,
+  "key_term_max_zipf": 6.0
+ },
+ "bm25": {
+  "k1": 1.2,
+  "b": 0.75
+ },
+ "seed": 42,
+ "_provenance": {
+  "fields.*.length": "Only limits a published external source states. title: at most 150 characters not counting spaces - EIP-AGRI Common Format (European Commission, 2015): project title 'short and easily understandable (one key sentence; max 150 characters, word count - no spaces)'. description: 50 to 5,000 characters - Google Search Central, Dataset structured data: 'The summary must be between 50 and 5000 characters long'. subtitle and keywords: no published source gives a length or a count, so none is imposed and the length sub-pillar is not evaluated for them. Earlier ranges (title 5-12 words, description 40-80 words, keywords 4-10) came from an LLM prompt and were removed.",
+  "fields.*.weight": "Equal weights, the default of the OECD/JRC Handbook on Constructing Composite Indicators (2008). A field that is absent and not required (subtitle) is left out and the remaining weights renormalised.",
+  "pillars": "Equal weights, same source. Structural / semantic / functional follow the 2025 KO quality diagram.",
+  "readability": "LIX (Bjornsson 1968), validated across 11 languages by Bjornsson (1983). On Bjornsson's scale 20 is very easy and 60 very difficult; below 40 covers easy and ordinary prose. Full score at or below 40, zero at or above 60, linear between. Applied to descriptions only, as Ochoa & Duval (2009) apply a readability index to the description, and only from min_words up: readability formulas are defined on samples of about 100 words and are unreliable on fragments; 40 words is a choice: below it one or two sentences dominate the index.",
+  "models.embedding": "Multilingual retrieval model (Wang et al. 2024, multilingual E5). Used for semantic findability, premise selection and term matching across languages.",
+  "models.nli": "XLM-RoBERTa large fine-tuned on MNLI + XNLI: judges whether the content supports a field, in any of the XNLI languages and across languages.",
+  "reference": "What a field is checked against: the vision model's reading of the file followed by the extracted text. Long documents are cut at max_chars, and NLI premises are drawn from the first max_chunks chunks.",
+  "coverage": "Coverage: the share of the file's key_terms most characteristic words that the field carries, literally or by meaning. Key terms: function words excluded (Zipf >= key_term_max_zipf in any corpus language, i.e. more frequent than 1 in 1,000 words; Zipf scale of van Heuven et al. 2014, frequencies from wordfreq), the rest ranked by TF-IDF with sublinear tf (Salton & Buckley 1988). 10 matches the usual keyphrase evaluation cut-off (F1@10, Meng et al., ACL 2017). 'By meaning' must beat the null_percentile of similarities of null_terms randomly drawn corpus keywords to the same field - a threshold learned per field.",
+  "bm25": "Standard Okapi BM25 parameters (Robertson & Zaragoza 2009).",
+  "specificity": "A word's specificity is the lower of (a) its normalised IDF across all KOs, which marks platform-generic words such as 'agriculture', and (b) 1 - its Zipf frequency / zipf_max in general usage of any language found in the corpus (wordfreq 3.x, Speer 2022), which marks everyday words in every language. Per-language document frequencies were tried first and dropped: only five languages have 200+ KOs, so in the other languages every word looked rare. zipf_max 8 is the top of the Zipf scale ('the' is 7.7).",
+  "coherence": "Coherence between title, description and keywords (Ochoa & Duval 2009, after Bruce & Hillmann's 'logical consistency and coherence'). Similarity is compared with the same field of null_pool randomly drawn KOs, so the score reads as 'better than this share of chance pairings' instead of an uncalibrated cosine.",
+  "diversity": "Keyword diversity follows KPEval (Wu, Yin & Chang, Findings of ACL 2024): the lexical dup_token_ratio after stemming and the semantic emb_sim, the mean pairwise cosine of the keyword embeddings. emb_sim has no natural scale, so it is anchored to the 5th-95th percentile over anchor_sample original keyword sets drawn from the corpus.",
+  "llm_review": "One call per KO. A proposal replaces a field only if its field score is at least min_gain points higher AND its accuracy against the file (the NLI part of consistency) is not lower by more than accuracy_tolerance: faithfulness is held as a constraint so the LLM cannot raise the score by being less faithful (reward over-optimisation, Gao, Schulman & Hilton, ICML 2023). accuracy_tolerance 0.02 absorbs NLI noise between near-identical texts; min_gain 1 point avoids swapping text for no measurable gain. weak_field_score: a field below this that the model calls 'correct' is reported as a disagreement for a person to look at. Model 'glm' is the one chosen for judging earlier in this project; max_file_chars bounds the cost of a call.",
+  "title_rules": "A title that is an internal project code (D3.1, T2.3, WP2, 'Task 4') or a file name is not 'short and easily understandable' to its reader (EIP-AGRI Common Format) nor 'descriptive' (Google Search Central, title links: 'Write descriptive and concise text... Avoid vague descriptors'). Checked in completeness; the file name is compared with ko_object_name. The description field is stored as editor HTML, so it is converted to text before any check instead of being counted as noise."
+ },
+ "specificity": {
+  "general_source": "wordfreq",
+  "zipf_max": 8.0
+ },
+ "coherence": {
+  "null_pool": 300
+ },
+ "diversity": {
+  "anchor_sample": 1000
+ },
+ "llm_review": {
+  "model": "glm",
+  "max_file_chars": 6000,
+  "max_tokens": 2000,
+  "min_gain": 1.0,
+  "accuracy_tolerance": 0.02,
+  "weak_field_score": 50
+ },
+ "title_rules": {
+  "internal_reference_pattern": "\\b(?:deliverable|milestone|task|work\\s*package)\\s*\\d+(?:\\.\\d+)*\\b|\\b(?:wp|ms)\\s?\\d+\\b|\\b[dt]\\s?\\d+\\.\\d+\\b",
+  "file_name_field": "ko_object_name"
+ }
+}

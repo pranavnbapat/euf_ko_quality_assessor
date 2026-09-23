@@ -1,26 +1,20 @@
 {
  "built": "2026-09-21",
  "records": 10468,
- "expected_at": 0.95,
+ "expected_at": 1.0,
  "expected_fields": [
   "category",
-  "creators",
   "date_of_completion",
   "date_of_completion_source",
   "description",
-  "intended_purposes",
   "keywords",
   "ko_resource_language",
   "languages",
   "license",
-  "locations",
   "project_acronym",
   "project_name",
   "project_type",
-  "subcategories",
-  "themes",
-  "title",
-  "topics"
+  "title"
  ],
  "field_roles": {
   "@id": "system",
@@ -203,6 +197,14 @@
   "license",
   "locations",
   "project_type",
+  "subcategories",
+  "themes",
+  "topics"
+ ],
+ "dropped_as_optional": [
+  "creators",
+  "intended_purposes",
+  "locations",
   "subcategories",
   "themes",
   "topics"
