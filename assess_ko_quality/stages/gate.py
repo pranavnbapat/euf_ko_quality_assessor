@@ -33,10 +33,11 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import pickle
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -58,6 +59,16 @@ MAX_CHARS = 2000
 # roughly a third of the corpus is not in English.
 ACCEPT_AT = 0.40   # keeps 100% of real KOs in all 14 languages, catches 94.6% of off-domain
 REVIEW_AT = 0.20   # below this, auto-reject: 56.2% of off-domain, 0% of real KOs
+
+# HYBRID. Where the classifier is confident its answer stands; inside this band an LLM
+# decides instead. Measured on labelled items, both methods kept 100% of real KOs, but
+# the classifier accepted 62% of near-miss documents (packaging, logistics, urban
+# planning) and 2% of clearly off-domain ones, against 15% and 0% for the LLM. The
+# near-miss documents scored 0.50-0.60, above ACCEPT_AT, which is why the band extends
+# past it. Real KOs sit well clear: 35 of 40 scored above 0.90 and all 40 above 0.70, so
+# on the actual corpus the LLM sees only a small minority of records.
+LLM_BAND_LOW = float(os.environ.get("KOQ_GATE_LLM_LOW", "0.20"))
+LLM_BAND_HIGH = float(os.environ.get("KOQ_GATE_LLM_HIGH", "0.70"))
 
 
 def _load_embedder():
@@ -190,6 +201,151 @@ def decide(p: float) -> str:
     if p >= REVIEW_AT:
         return "review"
     return "reject"
+
+
+def scope_topics() -> List[str]:
+    """
+    The platform's scope, read from its own topic vocabulary.
+
+    Deliberately not a list written here. EU-FarmBook is broader than farming practice:
+    13.5% of KOs carry only Economics, Society or Environment, and a prompt that
+    narrowed those to their rural corner would reject real content. Returns [] when the
+    data model is absent, which disables the LLM half of the gate rather than guessing.
+    """
+    from stages.compliance import discover_vocabularies
+
+    path = discover_vocabularies().get("topics")
+    if not path:
+        return []
+    acc: List[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in ("name", "label", "title", "prefLabel", "value") and isinstance(v, str):
+                    acc.append(v.strip())
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for x in node:
+                walk(x)
+
+    try:
+        walk(json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        return []
+    return list(dict.fromkeys(t for t in acc if t))
+
+
+LLM_SYSTEM = (
+    "You classify documents by subject matter for EU-FarmBook, a European knowledge "
+    "platform for agriculture in the broad sense: farming, forestry, livestock, food "
+    "and rural life, together with their economic, environmental and social dimensions."
+)
+
+
+def llm_prompt(title: str, text: str, topics: Sequence[str]) -> str:
+    # Both halves of this prompt are load-bearing, and each was learned from a failure.
+    #  - "Judge the SUBJECT ONLY": an earlier wording asked whether a document "belongs on
+    #    a platform of practical knowledge for farmers"; the model judged document type,
+    #    rejecting encyclopedia articles on dairy farming, forestry and livestock at 0.10
+    #    and 2 of 40 real KOs.
+    #  - "OF agriculture": a later wording called Economics, Environment and Society "full
+    #    topics, not footnotes to farming"; the model then accepted VAT law, cement,
+    #    general sociology, public administration and industrial automation.
+    # The out-of-scope clause states a principle, not examples. Naming the documents
+    # that failed would make any test on them meaningless - it would grade the prompt
+    # on answers it had been given.
+    return (
+        "EU-FarmBook organises everything it holds under these topics:\n"
+        + "\n".join(f"  - {t}" for t in topics)
+        + "\n\nThese are all topics that come under agriculture. Economics, Environment "
+        "and Society are in scope when the subject is the economics, environment or "
+        "society OF agriculture, food, forestry or rural life - farm incomes, agri-food "
+        "markets, rural communities, land use, biodiversity on farmland. They are NOT in "
+        "scope as general subjects: a document on economics, society, law, industry or "
+        "technology with no agricultural, food, forestry or rural focus is out.\n\n"
+        "Would this document sit under one or more of those topics?\n\n"
+        "Judge the SUBJECT ONLY. Format, audience, depth and usefulness are irrelevant: "
+        "an encyclopedia entry, a scientific paper, a policy brief and a farmer's leaflet "
+        "on the same subject are all equally in scope.\n\n"
+        f"TITLE: {title}\n\nTEXT:\n{text[:2500]}\n\n"
+        'Return JSON: {"in_scope": true|false, "confidence": 0.0-1.0, "why": "one sentence"}'
+    )
+
+
+def apply(
+    records: Sequence[Dict[str, Any]],
+    use_llm: bool = True,
+    client: Any = None,
+    workers: int = 8,
+) -> List[Dict[str, Any]]:
+    """
+    Run the gate over a batch: classifier for everything, LLM for the uncertain band.
+
+    Returns one dict per record with the classifier probability, the final decision,
+    what decided it, and the LLM's verdict and reason when one was asked. If the LLM is
+    unavailable or fails on a record, that record falls back to the classifier's own
+    thresholds, so the gate never stalls and never silently drops a KO.
+    """
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(f"No gate model at {MODEL_PATH}; run --calibrate first.")
+    bundle = pickle.loads(MODEL_PATH.read_bytes())
+
+    texts = [(r.get("ko_content_flat") or "") or (r.get("description") or "") for r in records]
+    probs = bundle["clf"].predict_proba(embed(texts))[:, 1]
+
+    results: List[Dict[str, Any]] = []
+    for p in probs:
+        p = float(p)
+        results.append({
+            "gate_probability": round(p, 4),
+            "gate_decision": decide(p),
+            "gate_decided_by": "classifier",
+        })
+
+    uncertain = [i for i, p in enumerate(probs) if LLM_BAND_LOW <= p < LLM_BAND_HIGH]
+    if not (use_llm and uncertain):
+        return results
+
+    topics = scope_topics()
+    if not topics:
+        for i in uncertain:
+            results[i]["gate_llm_note"] = "no topic vocabulary found; classifier decided"
+        return results
+
+    if client is None:
+        from core.llm import get_client
+        client = get_client(model=os.environ.get("KOQ_GATE_MODEL", "glm"))
+    if client is None:
+        for i in uncertain:
+            results[i]["gate_llm_note"] = "no LLM configured; classifier decided"
+        return results
+
+    def ask(i: int) -> Optional[Dict[str, Any]]:
+        rec = records[i]
+        title = str(rec.get("title") or "")
+        answer = client.complete_json(llm_prompt(title, texts[i], topics),
+                                      max_tokens=800, system=LLM_SYSTEM)
+        return answer if isinstance(answer, dict) else None
+
+    answers = client.map_concurrent(uncertain, ask, workers=workers, label="gate")
+    for i, ans in zip(uncertain, answers):
+        if not ans or "in_scope" not in ans:
+            results[i]["gate_llm_note"] = "LLM gave no usable answer; classifier decided"
+            continue
+        try:
+            conf = float(ans.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            conf = 0.5
+        p_in = conf if ans.get("in_scope") else 1.0 - conf
+        results[i].update({
+            "gate_decision": "accept" if p_in >= 0.5 else "reject",
+            "gate_decided_by": "llm",
+            "gate_llm_probability": round(p_in, 4),
+            "gate_llm_why": str(ans.get("why") or "")[:300],
+        })
+    return results
 
 
 def score_file(kos_path: Path) -> None:

@@ -43,7 +43,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from core.io_utils import _latest_json_file, _read_json_any, _unique_outfile, ensure_directory
 from core.text_utils import _ensure_str_list, detect_lang_safe, mtld, norm_text, strip_stops, tokens
@@ -68,6 +68,128 @@ def read_records(path: Path) -> List[Dict[str, Any]]:
     if len(raw) == 1 and isinstance(raw[0], dict) and isinstance(raw[0].get("docs"), list):
         return [d for d in raw[0]["docs"] if isinstance(d, dict)]
     return raw
+
+
+# --------------------------------------------------------------------------- selection
+# A KO's file type is recorded in three different places and none is complete:
+# category is the platform's own taxonomy, the extension is missing for 16.7% of
+# records, and the mimetype for 10.6%. Matching across all three means "--file-type pdf"
+# and "--file-type Video" both work without the caller having to know which field
+# carries the answer.
+_TYPE_FIELDS = ("category", "ko_object_extension", "ko_object_mimetype", "subcategories")
+
+
+def _values(rec: Dict[str, Any], field: str) -> List[str]:
+    v = rec.get(field)
+    if v is None:
+        return []
+    items = v if isinstance(v, (list, tuple)) else [v]
+    return [str(x).strip().lower().lstrip(".") for x in items if str(x).strip()]
+
+
+def matches_type(rec: Dict[str, Any], wanted: Sequence[str]) -> bool:
+    if not wanted:
+        return True
+    have = {v for f in _TYPE_FIELDS for v in _values(rec, f)}
+    flat = " ".join(have)
+    for w in wanted:
+        w = w.strip().lower().lstrip(".")
+        if w in have or w in flat:
+            return True
+    return False
+
+
+def primary_language(rec: Dict[str, Any]) -> str:
+    """
+    A KO's language is the first one listed.
+
+    About a fifth of records carry more than one. Taking the first keeps filtering and
+    counting consistent: asking for French returns KOs whose language is French, and
+    every KO belongs to exactly one bucket. A KO listed as English then Spanish is
+    treated as English and will not come back from a Spanish filter.
+    """
+    langs = rec.get("languages") or []
+    if isinstance(langs, str):
+        langs = [langs]
+    names = [str(x).strip() for x in langs if str(x).strip()]
+    return names[0] if names else "unknown"
+
+
+def select_records(
+    records: Sequence[Dict[str, Any]],
+    limit: int = 0,
+    min_chars: int = 500,
+    file_types: Sequence[str] = (),
+    languages: Sequence[str] = (),
+    lang_balance: str = "equal",
+    seed: int = 42,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Choose which KOs to assess, and say plainly what was left out.
+
+    `lang_balance="equal"` spreads a limited run round-robin across the languages
+    present, so a 100-record run is not 57% English simply because the platform is.
+    Use "proportional" to mirror the corpus instead.
+
+    Excluded counts are reported rather than swallowed. `min_chars` in particular
+    removes about 36% of this corpus - the KOs whose text never extracted - and those
+    are a real finding about ingestion, not records that do not matter.
+    """
+    import random
+
+    rng = random.Random(seed)
+    report: Dict[str, Any] = {"input": len(records), "excluded": {}}
+
+    kept = list(records)
+    if min_chars > 0:
+        before = len(kept)
+        kept = [r for r in kept if len(norm_text(r.get("ko_content_flat"))) >= min_chars]
+        report["excluded"]["below_min_chars"] = before - len(kept)
+    if file_types:
+        before = len(kept)
+        kept = [r for r in kept if matches_type(r, file_types)]
+        report["excluded"]["wrong_file_type"] = before - len(kept)
+    if languages:
+        asked = {l.strip().lower() for l in languages if l.strip()}
+        if asked and "all" not in asked:
+            before = len(kept)
+            kept = [r for r in kept if primary_language(r).lower() in asked]
+            report["excluded"]["wrong_language"] = before - len(kept)
+
+    report["eligible"] = len(kept)
+
+    if limit and limit < len(kept):
+        by_lang: Dict[str, List[Dict[str, Any]]] = {}
+        for r in kept:
+            by_lang.setdefault(primary_language(r), []).append(r)
+        for pool in by_lang.values():
+            rng.shuffle(pool)
+
+        if lang_balance == "equal":
+            # Round-robin, so languages with few records contribute what they have and
+            # the rest is shared out rather than the largest language absorbing it.
+            picked: List[Dict[str, Any]] = []
+            order = sorted(by_lang, key=lambda k: len(by_lang[k]))
+            while len(picked) < limit:
+                progressed = False
+                for lang in order:
+                    if by_lang[lang] and len(picked) < limit:
+                        picked.append(by_lang[lang].pop())
+                        progressed = True
+                if not progressed:
+                    break
+            kept = picked
+        else:
+            kept = rng.sample(kept, limit)
+
+    report["selected"] = len(kept)
+    report["by_language"] = dict(sorted(
+        {l: sum(1 for r in kept if primary_language(r) == l) for l in
+         {primary_language(r) for r in kept}}.items(), key=lambda kv: -kv[1]))
+    report["by_category"] = dict(sorted(
+        {c: sum(1 for r in kept if c in _values(r, "category")) for c in
+         {v for r in kept for v in _values(r, "category")}}.items(), key=lambda kv: -kv[1]))
+    return kept, report
 
 
 # --------------------------------------------------------------------------- stages
@@ -99,21 +221,18 @@ def measure(ko: Dict[str, Any]) -> Dict[str, Any]:
 
 def assess(
     ko: Dict[str, Any],
-    gate_model: Any = None,
-    gate_prob: Optional[float] = None,
+    gate_result: Optional[Dict[str, Any]] = None,
     judge: Optional[Dict[str, Any]] = None,
     profile: Optional[Dict[str, Any]] = None,
     thresholds: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Assess one KO through every stage. Gate probability is supplied by the caller."""
+    """Assess one KO through every stage. The gate result is supplied by the caller."""
     ko_id = ko.get("_orig_id") or ko.get("_id") or ko.get("@id") or ""
     row: Dict[str, Any] = {"_orig_id": ko_id, "title": norm_text(ko.get("title"))[:300]}
 
     # --- Stage 0: gate -----------------------------------------------------
-    if gate_prob is not None:
-        from stages.gate import decide
-        row["gate_probability"] = round(float(gate_prob), 4)
-        row["gate_decision"] = decide(float(gate_prob))
+    if gate_result:
+        row.update(gate_result)
     else:
         row["gate_probability"] = None
         row["gate_decision"] = "not_evaluated"
@@ -133,8 +252,11 @@ def assess(
 
     # --- Stage 1: compliance ----------------------------------------------
     comp = compliance_stage.check(ko, profile=profile)
-    row.update({k: v for k, v in comp.items() if k != "compliance_checks"})
+    row.update({k: v for k, v in comp.items()
+                if k not in ("compliance_checks", "compliance_vocab_drift")})
     row["compliance_checks"] = json.dumps(comp["compliance_checks"], separators=(",", ":"))
+    row["compliance_vocab_drift"] = json.dumps(comp.get("compliance_vocab_drift") or {},
+                                               ensure_ascii=False, separators=(",", ":"))
 
     # --- Stage 2: score ----------------------------------------------------
     # The judge's overall verdict is a scored input when a judge ran; without one the
@@ -179,6 +301,7 @@ def assess(
 def run(
     records: List[Dict[str, Any]],
     use_gate: bool = True,
+    use_gate_llm: bool = True,
     use_judge: bool = False,
     judge_model: str = "",
     workers: int = 8,
@@ -191,22 +314,28 @@ def run(
     if thresholds is None:
         print("[WARN] no diagnostic thresholds; run --learn. Nothing will be flagged unusual.")
 
-    # Gate: one batched embedding pass rather than per-KO.
-    gate_probs: List[Optional[float]] = [None] * len(records)
+    # Gate: classifier for every KO in one batched pass; an LLM only for the band where
+    # the classifier is unsure. On real KOs that band is nearly empty, so the LLM sees a
+    # small minority of records - the ones where its judgement changes the outcome.
+    gate_results: List[Optional[Dict[str, Any]]] = [None] * len(records)
     if use_gate:
         try:
             from stages import gate as gate_stage
-            import pickle
-            if gate_stage.MODEL_PATH.exists():
-                bundle = pickle.loads(gate_stage.MODEL_PATH.read_bytes())
-                print(f"[INFO] gate: embedding {len(records)} records ...", flush=True)
-                texts = [(r.get("ko_content_flat") or "") or (r.get("description") or "")
-                         for r in records]
-                probs = bundle["clf"].predict_proba(gate_stage.embed(texts))[:, 1]
-                print("[INFO] gate: done", flush=True)
-                gate_probs = [float(p) for p in probs]
-            else:
-                print(f"[WARN] no gate model at {gate_stage.MODEL_PATH}; skipping stage 0.")
+            print(f"[INFO] gate: classifying {len(records)} records ...", flush=True)
+            gate_results = gate_stage.apply(records, use_llm=use_gate_llm, workers=workers)
+            by_llm = [g for g in gate_results if g and g.get("gate_decided_by") == "llm"]
+            # "Reversed" compares against the classifier's own lean, not its three-way
+            # decision: a classifier "review" is not an answer the LLM can agree with, so
+            # counting every resolved review as a reversal overstated the LLM's effect.
+            reversed_ = sum(1 for g in by_llm
+                            if (g["gate_probability"] >= gate_stage.ACCEPT_AT)
+                            != (g["gate_decision"] == "accept"))
+            band = f"[{gate_stage.LLM_BAND_LOW:.2f}, {gate_stage.LLM_BAND_HIGH:.2f})"
+            print(f"[INFO] gate: {len(by_llm)} of {len(records)} fell in the uncertain band "
+                  f"{band} and went to the LLM; it reversed the classifier's lean on "
+                  f"{reversed_}", flush=True)
+        except FileNotFoundError as exc:
+            print(f"[WARN] {exc}; skipping stage 0.")
         except Exception as exc:
             print(f"[WARN] gate unavailable ({type(exc).__name__}: {exc}); skipping stage 0.")
 
@@ -215,7 +344,8 @@ def run(
     if use_judge:
         from stages.gate import decide
         from stages.llm_judge import judge_many, load_rubric
-        wanted = [i for i, p in enumerate(gate_probs) if p is None or decide(p) != "reject"]
+        wanted = [i for i, g in enumerate(gate_results)
+                  if g is None or g.get("gate_decision") != "reject"]
         if wanted:
             print(f"[INFO] judge: {len(wanted)} KOs to judge ...", flush=True)
             rubric = load_rubric(Path("data/2024_KOs for assessment all collating.xlsx"))
@@ -235,7 +365,7 @@ def run(
     try:
         for i, ko in enumerate(records):
             try:
-                row = assess(ko, gate_prob=gate_probs[i], judge=judgements[i],
+                row = assess(ko, gate_result=gate_results[i], judge=judgements[i],
                              profile=profile, thresholds=thresholds)
             except Exception as exc:
                 row = {"_orig_id": ko.get("_orig_id") or ko.get("_id") or f"row_{i}",
@@ -299,16 +429,48 @@ def main() -> None:
     ap.add_argument("--judge", action="store_true", help="Run the LLM judge (diagnostics only)")
     ap.add_argument("--judge-model", default="", help="Model preference, e.g. 'gpt-oss'")
     ap.add_argument("--no-gate", action="store_true", help="Score every KO, including off-domain")
-    ap.add_argument("--limit", type=int, default=0, help="Only process the first N records")
+    ap.add_argument("--no-gate-llm", action="store_true",
+                    help="Classifier-only gate: no LLM calls for uncertain records")
+    ap.add_argument("--limit", type=int, default=0, help="Assess at most N records (0 = all)")
+    ap.add_argument("--min-chars", type=int, default=500,
+                    help="Skip KOs with less extracted text than this (default 500; "
+                         "0 to include failed extractions)")
+    ap.add_argument("--file-type", default="",
+                    help="Comma list, matched against category, extension, mimetype and "
+                         "subcategory: 'pdf', 'mp4', 'Video', 'Factsheet'")
+    ap.add_argument("--languages", default="",
+                    help="Comma list of languages to keep, e.g. 'English,French'. "
+                         "Empty or 'all' keeps every language")
+    ap.add_argument("--lang-balance", choices=("equal", "proportional"), default="equal",
+                    help="How --limit is spread across languages (default equal)")
+    ap.add_argument("--seed", type=int, default=42, help="Sampling seed")
     ap.add_argument("--workers", type=int, default=8)
     args = ap.parse_args()
 
     path = args.input or _latest_json_file("input")
     print(f"[INFO] input: {path}")
     records = read_records(Path(path))
-    if args.limit:
-        records = records[:args.limit]
-    print(f"[INFO] {len(records)} records")
+    print(f"[INFO] {len(records)} records in file")
+
+    records, selection = select_records(
+        records,
+        limit=args.limit,
+        min_chars=args.min_chars,
+        file_types=[t for t in args.file_type.split(",") if t.strip()],
+        languages=[l for l in args.languages.split(",") if l.strip()],
+        lang_balance=args.lang_balance,
+        seed=args.seed,
+    )
+    for reason, n in selection["excluded"].items():
+        if n:
+            print(f"[INFO] excluded {n} ({reason})")
+    print(f"[INFO] eligible {selection['eligible']} -> assessing {selection['selected']}")
+    if selection["by_language"]:
+        print(f"[INFO] languages: {selection['by_language']}")
+    if selection["by_category"]:
+        print(f"[INFO] categories: {selection['by_category']}")
+    if not records:
+        sys.exit("Nothing selected. Loosen --min-chars, --file-type or --languages.")
 
     if args.learn:
         learn(records)
@@ -316,7 +478,8 @@ def main() -> None:
     ensure_directory(args.output_dir)
     checkpoint = args.output_dir / "ko_quality_partial.jsonl"
     t0 = time.time()
-    rows = run(records, use_gate=not args.no_gate, use_judge=args.judge,
+    rows = run(records, use_gate=not args.no_gate, use_gate_llm=not args.no_gate_llm,
+               use_judge=args.judge,
                judge_model=args.judge_model, workers=args.workers,
                checkpoint=checkpoint)
     print(f"[INFO] assessed in {time.time() - t0:.0f}s")
@@ -326,6 +489,7 @@ def main() -> None:
     incomplete = sum(1 for r in rows if r.get("compliance_status") == "incomplete")
     print(f"[INFO] gate rejected {gated} | scored {scored} | compliance incomplete {incomplete}")
     write_outputs(rows, args.output_dir)
+    (args.output_dir / "selection.json").write_text(json.dumps(selection, indent=1))
     if checkpoint.exists():
         checkpoint.unlink()      # final files written; the partial is redundant
 
