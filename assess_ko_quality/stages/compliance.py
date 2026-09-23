@@ -43,7 +43,22 @@ DEFAULT_PROFILE = HERE.parent / "validation" / "compliance_profile.json"
 
 # Where the controlled vocabularies live. Gitignored, so every CV check degrades to
 # "skipped" rather than "failed" when the folder is absent.
-CV_DIR = Path(os.environ.get("KO_DM_DIR", HERE.parents[2] / "data_model_v2"))
+#
+# Found by searching upward rather than by a fixed depth. A fixed depth pointed one level
+# too high after this module moved into stages/, and because a missing vocabulary means
+# the check loop never runs, every CV check was silently absent - not failed, not even
+# listed as skipped - while records reported compliance_status "complete".
+def _find_cv_dir() -> Path:
+    if os.environ.get("KO_DM_DIR"):
+        return Path(os.environ["KO_DM_DIR"])
+    for parent in HERE.parents:
+        candidate = parent / "data_model_v2"
+        if candidate.is_dir():
+            return candidate
+    return HERE.parents[1] / "data_model_v2"
+
+
+CV_DIR = _find_cv_dir()
 CV_GLOB = "data_model.*.json"
 
 _CV_CACHE: Dict[str, Optional[Set[str]]] = {}
@@ -90,14 +105,35 @@ def _load_cv(field: str, path: Path) -> Optional[Set[str]]:
 
 
 # --------------------------------------------------------------------- helpers
+_LABEL_KEYS = ("name", "label", "value", "title", "prefLabel")
+
+
+def _label(x: Any) -> Optional[str]:
+    """
+    The human-readable value of one entry.
+
+    Some fields hold objects rather than strings - locations are stored as
+    {"name": "Spain", "nuts_id": "ES"}. Stringifying the whole object produced
+    "{'name': 'Spain', ...}", which can never match a vocabulary, so every location
+    check failed on every record. Take the label out of the object instead.
+    """
+    if x is None:
+        return None
+    if isinstance(x, dict):
+        for k in _LABEL_KEYS:
+            v = x.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+    text = str(x).strip()
+    return text or None
+
+
 def _as_list(v: Any) -> List[str]:
     if v is None:
         return []
-    if isinstance(v, str):
-        return [v] if v.strip() else []
-    if isinstance(v, (list, tuple, set)):
-        return [str(x) for x in v if x is not None and str(x).strip()]
-    return [str(v)] if str(v).strip() else []
+    items = v if isinstance(v, (list, tuple, set)) else [v]
+    return [lab for lab in (_label(x) for x in items) if lab]
 
 
 def _populated(v: Any) -> bool:
@@ -285,13 +321,29 @@ def check(
         checks["not_stale"] = year >= stale_before
 
     evaluated = {k: v for k, v in checks.items() if v is not None}
-    failed = sorted(k for k, v in evaluated.items() if not v)
+
+    # A value outside the CURRENT vocabulary is not the contributor failing an obligation.
+    # 58% of records use intended_purposes values ("Dissemination", "Communication") from
+    # a vocabulary the platform has since replaced; the contributor chose correctly from
+    # the list they were shown. Counting that as a failure marked 69% of the corpus
+    # non-compliant for a migration nobody asked them to do. Vocabulary mismatches are
+    # therefore reported as drift, and only missing obligations decide the status.
+    drift: Dict[str, List[str]] = {}
+    for field, path in discover_vocabularies(cv_dir).items():
+        if checks.get(f"cv_{field}") is False:
+            allowed = _load_cv(field, path) or set()
+            stray = [v for v in _as_list(ko.get(field)) if v.strip().lower() not in allowed]
+            if stray:
+                drift[field] = stray
+
+    failed = sorted(k for k, v in evaluated.items() if not v and not k.startswith("cv_"))
 
     return {
         "compliance_checks": checks,
         "compliance_passed": sum(1 for v in evaluated.values() if v),
         "compliance_evaluated": len(evaluated),
         "compliance_failed": failed,
+        "compliance_vocab_drift": drift,
         "compliance_skipped": sorted(k for k, v in checks.items() if v is None),
         "compliance_status": "complete" if not failed else "incomplete",
         "compliance_profile_used": bool(profile),

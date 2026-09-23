@@ -196,5 +196,15 @@
  },
  "stale_before_year": 2016,
  "stale_percentile": 0.05,
- "vocabularies": []
+ "vocabularies": [
+  "category",
+  "intended_purposes",
+  "languages",
+  "license",
+  "locations",
+  "project_type",
+  "subcategories",
+  "themes",
+  "topics"
+ ]
 }
