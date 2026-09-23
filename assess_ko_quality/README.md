@@ -9,13 +9,92 @@ previous generation measured had not been, and most of that turned out not to wo
 ```bash
 cd assess_ko_quality
 
-python pipeline.py --input input/kos.json              # assess
-python pipeline.py --input input/kos.json --learn      # refit corpus profiles first
-python pipeline.py --input input/kos.json --judge      # add the LLM judge (diagnostics)
+python pipeline.py --input ../input/kos.json              # assess
+python pipeline.py --input ../input/kos.json --judge      # add the LLM judge
+python pipeline.py --input ../input/kos.json --learn      # refit corpus profiles first
 ```
 
 Run everything from inside this folder. Modules import as `core.*` / `stages.*`, so
 scripts under a subfolder run as `python -m validation.validate_metrics`.
+
+---
+
+## Choosing what to assess
+
+You rarely want all 10,468 at once. Every filter reports what it removed rather than
+dropping it quietly, and the selection is written to `output/selection.json` so a run
+describes itself.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--limit N` | 0 (all) | Assess at most N records |
+| `--min-chars N` | 500 | Skip KOs with less extracted text than this |
+| `--file-type` | all | `pdf`, `mp4`, `Video`, `Factsheet`, … (comma list) |
+| `--languages` | all | `English,French` (comma list) |
+| `--lang-balance` | equal | How `--limit` is spread across languages |
+| `--seed` | 42 | Sampling seed, so a run repeats |
+| `--no-gate-llm` | off | Classifier-only gate; no LLM calls at stage 0 |
+
+```bash
+# 100 records, spread evenly across languages, real text only
+python pipeline.py --input ../input/kos.json --limit 100
+
+# 50 English PDFs
+python pipeline.py --input ../input/kos.json --limit 50 --file-type pdf --languages English
+
+# every video, including ones whose text never extracted
+python pipeline.py --input ../input/kos.json --file-type mp4 --min-chars 0
+```
+
+### File type
+
+`--file-type` is matched against **category, extension, mimetype and subcategory** at
+once, so `pdf`, `Video` and `Factsheet` all work without you having to know which field
+holds the answer. That matters: the extension is missing on 16.7% of records and the
+mimetype on 10.6%, so matching a single field would silently drop rows.
+
+The corpus is 90.8% `Document` (81.2% of everything is `.pdf`), 4.7% `Video`, 2.5%
+`Slideshow/Presentation`, and small numbers of `Image`, `Dataset`, `Audio` and
+`Software Application`.
+
+### Language
+
+A KO's language is the **first one listed**. About 12% carry more than one; taking the
+first keeps filtering and counting consistent, so a request never returns anything
+outside it. A KO listed as English then Spanish is treated as English and will not come
+back from a Spanish filter.
+
+### `--lang-balance`: equal or proportional
+
+Only relevant when `--limit` is set **and** more than one language is in play. With
+`--languages English` there is nothing to balance between, so omit it.
+
+**proportional** mirrors the corpus. **equal** gives each language roughly the same
+number of records. With a 61%-English corpus and `--limit 40`:
+
+| language | corpus | equal | proportional |
+|---|---|---|---|
+| English | 61.4% | 2 | 23 |
+| Spanish | 11.5% | 2 | 5 |
+| German | 4.3% | 2 | **0** |
+| Greek | 1.8% | 2 | 2 |
+| **languages covered** | 21 | **21** | **10** |
+
+A proportional run of 40 touches 10 of your 21 languages and gives German nothing — you
+would finish it knowing nothing about how the pipeline handles German. The equal run
+covers all 21.
+
+Use **equal** (the default) to check the pipeline or compare across languages. Use
+**proportional** when the aggregate is the point, such as "what is the average quality
+of the platform" — an equal sample over-weights small languages and describes no real
+population. Do not read corpus statistics off an equal sample.
+
+### The 500-character floor
+
+`--min-chars 500` is the default and it excludes **35.9% of the corpus** — the KOs whose
+text never extracted. That is right for assessing quality, since there is nothing to
+assess, but those records are a real finding about ingestion rather than records that do
+not matter. The count is always printed. Pass `--min-chars 0` to include them.
 
 ---
 
@@ -56,6 +135,13 @@ concepts produces a vector pointing nowhere in particular.
 | cosine to anchor centroid (old) | 0.647 |
 | mean of top-10 anchor similarities | 0.768 |
 | **logistic regression on embeddings** | **1.000** |
+
+The gate is a **hybrid**: that classifier decides every confident case, and an LLM
+decides only the uncertain band, `[0.20, 0.70)`. Real KOs almost never land there — 98.7%
+of even the Economics/Society/Environment-only ones are accepted outright — so on a
+real corpus the LLM sees a small minority of records. Its scope comes from
+`data_model.topics.json`. Use `--no-gate-llm` for a classifier-only gate with no LLM
+calls. Details and the prompt's failure history are in `METHODS.md` section 1.
 
 The 10,468 real KOs define the domain far better than a thesaurus does. At the
 calibrated threshold: **100% of real KOs kept in all 14 languages**, 94.6% of

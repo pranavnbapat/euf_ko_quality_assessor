@@ -7,6 +7,10 @@ venv/
 # Ignore database and credentials
 *.sqlite3
 .env
+# Every variant too: a .env.local or a .env.bak left behind after an endpoint
+# migration carries live keys and is otherwise perfectly committable.
+.env.*
+!.env.sample
 
 # Ignore compiled Python files
 __pycache__/

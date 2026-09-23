@@ -13,9 +13,11 @@ commands in the last section.
 
 ## 1. Stage 0 — Domain gate
 
+**Hybrid: a classifier for every KO, an LLM only where the classifier is unsure.**
+
 | Property | Value |
 |---|---|
-| Method | Logistic regression on sentence embeddings |
+| Method | Logistic regression on sentence embeddings, then an LLM for the uncertain band |
 | Embedding model | `all-mpnet-base-v2`, first 2,000 characters of content (or description) |
 | Positive class | Real KOs from the export |
 | Negative class | Off-domain documents (Wikipedia, five languages) |
@@ -34,6 +36,54 @@ commands in the last section.
 At `accept`: 100% of real KOs retained in all 14 languages tested, 94.6% of off-domain
 caught. The threshold is **not** raised further because a language gap opens above 0.60
 — at 0.70, German retention falls to 83% and Greek to 33%.
+
+### The LLM half
+
+Records scoring in **[0.20, 0.70)** go to an LLM (glm-5.2 by default,
+`KOQ_GATE_MODEL` to change) and its verdict replaces the classifier's. Outside that band
+the classifier decides alone. Override the band with `KOQ_GATE_LLM_LOW` /
+`KOQ_GATE_LLM_HIGH`; turn the LLM off with `--no-gate-llm`.
+
+The prompt's scope is **read from `data_model.topics.json`**, not written in code. If the
+data model is absent, or the LLM is unavailable or fails on a record, that record falls
+back to the classifier's thresholds — the gate never stalls and never drops a KO.
+
+Why hybrid, measured on 140 labelled items:
+
+| | classifier | LLM | hybrid |
+|---|---|---|---|
+| real KOs kept | 100% | 100% | 100% |
+| clearly off-domain rejected | 98% | 100% | 100% |
+| near-miss accepted | 62% | 15% | — |
+
+The two fail in different places, so each covers the other. On **real KOs** the classifier
+is confident — 35 of 40 scored above 0.90, all 40 above 0.70, and 98.7% of
+Economics/Society/Environment-only KOs are accepted outright — so the LLM almost never
+sees them. On **near-miss documents** (packaging, logistics, urban planning) the
+classifier scored 0.50–0.60 and would have accepted them; the LLM rejects them. On the
+uncertain band the LLM went **12 for 12**.
+
+The LLM is not better in general. In the same test it rejected a genuine KO on urban
+green space and air quality at 0.10 — which the classifier accepts at 0.95, so in the
+hybrid the LLM never sees it.
+
+### The prompt was fragile, twice
+
+Both clauses in `stages/gate.py:llm_prompt()` exist because a wording failed:
+
+- **"Judge the SUBJECT ONLY."** Asking whether a document "belongs on a platform of
+  practical knowledge for farmers" made the model judge document *type*. It rejected
+  Wikipedia's *Dairy farming*, *Forestry* and *Livestock* articles at 0.10, and 2 of 40
+  real KOs — on a full run, roughly 500 legitimate KOs lost silently.
+- **"Economics, Environment and Society OF agriculture."** Calling them "full topics, not
+  footnotes to farming" overcorrected: the model accepted VAT law, cement, general
+  sociology, public administration and industrial automation.
+
+The out-of-scope clause states a principle rather than examples. Naming the documents
+that failed would have made the test on them meaningless.
+
+Whoever changes this prompt should re-run the comparison: an LLM gate that fails does so
+silently, as a rejected KO rather than an error.
 
 ### What was rejected, and why
 
@@ -57,7 +107,7 @@ judgement at **−0.217** (p = 0.039) — significant, and the wrong direction.
 | Rule | A field populated in ≥ 95% of records, **and** classified as contributor-supplied |
 | Field classification | LLM, into contributor / system / derived |
 | Staleness cut-off | 2016 — the 5th percentile of corpus completion years |
-| Vocabularies | Every `data_model.*.json` found in `data_model_v2/` |
+| Vocabularies | Every `data_model.*.json` found in `data_model_v2/`, located by searching upward |
 
 Only contributor fields become obligations. `title_llm`, `ko_content_flat_vision` and
 `locations_flat` are populated nearly everywhere but are *derived* — failing a KO
@@ -65,6 +115,37 @@ because our own enrichment did not run would be nonsense.
 
 Each check returns pass, fail, or **not evaluable** (no vocabulary present locally, or
 no profile). Not-evaluable never counts as a failure.
+
+> **Correction.** Until 23 September 2026 the vocabulary checks never ran. The path to
+> `data_model_v2/` pointed one directory too high after the module moved into
+> `stages/`, and because a missing vocabulary means the check loop never executes, the
+> checks were not failed or even listed as skipped — simply absent — while records
+> reported `compliance_status: complete`. Earlier outputs were never vocabulary-checked.
+
+### Vocabulary drift is not a failed obligation
+
+Once the checks ran, 58% of records failed `intended_purposes`. They use *Dissemination*,
+*Communication*, *Evaluation* and *Experimentation* — a vocabulary the platform has since
+replaced with 15 different purposes. A contributor who picked *Dissemination* chose
+correctly from the list they were shown.
+
+Counting that as a failure marked **69% of the corpus** non-compliant for a platform-side
+migration. So values outside the current vocabulary are reported in
+`compliance_vocab_drift` and do not affect `compliance_status`. On 1,000 records:
+
+| | |
+|---|---|
+| complete | 905 |
+| incomplete (genuine obligations) | 95 — stale, missing topics, locations, creators |
+| drift: `intended_purposes` | 575 |
+| drift: `subcategories` | 60 — a consolidated scheme not in the current file |
+| drift: `locations` | 41 — UK, Tunisia, Lebanon, Morocco, outside EU NUTS |
+
+The drift column is a platform migration backlog, not a list of contributor errors.
+
+Location values are stored as objects — `{"name": "Spain", "nuts_id": "ES"}` — and the
+label is extracted before matching. An earlier version stringified the whole object and
+failed every location on every record.
 
 ---
 
