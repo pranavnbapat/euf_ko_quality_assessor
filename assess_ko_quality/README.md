@@ -1,28 +1,51 @@
 # assess_ko_quality
 
-Assesses the quality of EU-FarmBook Knowledge Objects.
+Assesses the quality of EU-FarmBook Knowledge Objects (KOs). A KO is a file plus the
+metadata that describes it. **The score measures the metadata** - title, subtitle,
+description and keywords - against the file: is it correct, informative, well-formed and
+findable? The file itself is the original author's work, so its quality is measured and
+reported, and never changes the score.
 
-One entry point, `pipeline.py`, running four stages. Every number it emits states
-whether it has been validated against human judgement, because most of what the
-previous generation measured had not been, and most of that turned out not to work.
+Every criterion is measurable and reproducible, taken from published research and
+standards; nothing is fitted to human ratings. Each part is checked technically: the
+pipeline damages metadata on purpose and confirms that the matching measurement notices.
+
+| document | what it covers |
+|---|---|
+| this README | running the pipeline and reading its outputs |
+| [`METHODS.md`](METHODS.md) | every method, threshold and weight, precisely enough to reimplement |
+| [`LITERATURE_REVIEW.md`](LITERATURE_REVIEW.md) | where each method comes from, why it was chosen, and the evidence behind every number |
+| `How_the_KO_quality_pipeline_works.docx` | the two documents above as a Word guide, generated from them |
+| `validation/metadata_spec.json` | every configurable setting, with its provenance |
+
+---
+
+## Quick start
 
 ```bash
 cd assess_ko_quality
-
-python pipeline.py --input ../input/kos.json              # assess
-python pipeline.py --input ../input/kos.json --judge      # add the LLM judge
-python pipeline.py --input ../input/kos.json --learn      # refit corpus profiles first
+python pipeline.py --limit 20                  # 20 KOs, one per language
+python pipeline.py --limit 20 --selftest       # plus the perturbation self-test
+python pipeline.py --limit 10 --llm-review     # plus LLM review: 10 calls
+python pipeline.py --no-gate-llm --limit 200   # no LLM calls at all
 ```
 
-Run everything from inside this folder. Modules import as `core.*` / `stages.*`, so
-scripts under a subfolder run as `python -m validation.validate_metrics`.
+The first run on an export builds a corpus index: about 20 minutes the very first time
+(it embeds every KO once), about 5 minutes after a settings change, seconds otherwise. It
+is cached in `output/_corpus_cache/`. Assessment then takes about 25-30 seconds per KO on
+CPU, mostly the entailment model.
+
+**LLM calls.** Only two stages can call an LLM: the domain gate, for the few KOs its
+classifier is unsure about (typically 0-10%; `--no-gate-llm` turns it off), and the
+optional LLM review (`--llm-review`, one call per KO, capped by `--llm-limit`, default
+10). Responses are cached, so rerunning costs nothing.
 
 ---
 
 ## Choosing what to assess
 
 You rarely want all 10,468 at once. Every filter reports what it removed rather than
-dropping it quietly, and the selection is written to `output/selection.json` so a run
+dropping it quietly, and the selection is written to the run's `run.json` so a run
 describes itself.
 
 | Flag | Default | What it does |
@@ -33,17 +56,17 @@ describes itself.
 | `--languages` | all | `English,French` (comma list) |
 | `--lang-balance` | equal | How `--limit` is spread across languages |
 | `--seed` | 42 | Sampling seed, so a run repeats |
-| `--no-gate-llm` | off | Classifier-only gate; no LLM calls at stage 0 |
+| `--no-gate-llm` | off | Classifier-only gate; with no `--llm-review`, no LLM calls at all |
 
 ```bash
 # 100 records, spread evenly across languages, real text only
-python pipeline.py --input ../input/kos.json --limit 100
+python pipeline.py --limit 100
 
 # 50 English PDFs
-python pipeline.py --input ../input/kos.json --limit 50 --file-type pdf --languages English
+python pipeline.py --limit 50 --file-type pdf --languages English
 
 # every video, including ones whose text never extracted
-python pipeline.py --input ../input/kos.json --file-type mp4 --min-chars 0
+python pipeline.py --file-type mp4 --min-chars 0
 ```
 
 ### File type
@@ -80,167 +103,181 @@ number of records. With a 61%-English corpus and `--limit 40`:
 | Greek | 1.8% | 2 | 2 |
 | **languages covered** | 21 | **21** | **10** |
 
-A proportional run of 40 touches 10 of your 21 languages and gives German nothing — you
-would finish it knowing nothing about how the pipeline handles German. The equal run
-covers all 21.
-
 Use **equal** (the default) to check the pipeline or compare across languages. Use
 **proportional** when the aggregate is the point, such as "what is the average quality
-of the platform" — an equal sample over-weights small languages and describes no real
-population. Do not read corpus statistics off an equal sample.
+of the platform" - an equal sample over-weights small languages and describes no real
+population.
 
 ### The 500-character floor
 
-`--min-chars 500` is the default and it excludes **35.9% of the corpus** — the KOs whose
-text never extracted. That is right for assessing quality, since there is nothing to
-assess, but those records are a real finding about ingestion rather than records that do
-not matter. The count is always printed. Pass `--min-chars 0` to include them.
+`--min-chars 500` is the default and it excludes **35.9% of the corpus** - the KOs whose
+text never extracted. There is nothing to check the metadata against, but those records
+are a real finding about ingestion. The count is always printed. Pass `--min-chars 0` to
+include them; their semantic and functional sub-pillars are then "not evaluable".
 
 ---
 
-## The four stages
+## The pipeline
 
 ```
-  KO
-   │
-   ├── STAGE 0  GATE ........... is this in scope at all?
-   │                             accept / review / reject · off-domain KOs are not scored
-   │
-   ├── STAGE 1  COMPLIANCE ..... obligations, as a pass/fail checklist
-   │                             deliberately NOT part of the score
-   │
-   ├── STAGE 2  SCORE .......... the one validated number, 0-100
-   │                             content depth + lexical variety
-   │
-   └── STAGE 3  DIAGNOSTICS .... everything else, as "unusual for this corpus"
-                                 plus LLM judge wording, never as a score term
+select ─► 1 GATE ─► 2 COMPLIANCE ─► 3 CONTENT ─► 4 METADATA SCORE ─► 5 LLM REVIEW ─► 6 ANALYSIS
 ```
 
-### Why relevance is a gate, not a pillar
-
-Domain relevance used to be 10% of a weighted total. Three off-domain documents written
-to be structurally strong — Bach's Brandenburg Concertos, asynchronous server handlers,
-atrial fibrillation — scored **75.2 to 75.8**, above *every* real agricultural KO in the
-same run, with the domain pillar switched on. At 10% weight the most an irrelevant
-upload can lose is 10 points, so a polished off-topic document always passes.
-
-Relevance is a precondition, not a quality you can trade against good formatting.
-
-The old measure could not have caught them anyway: cosine to the AGROVOC/NALT centroid
-gave a crop-rotation guide 0.071 and literal gibberish 0.069. Averaging 96,691 thesaurus
-concepts produces a vector pointing nowhere in particular.
-
-| gate method | AUC |
-|---|---|
-| cosine to anchor centroid (old) | 0.647 |
-| mean of top-10 anchor similarities | 0.768 |
-| **logistic regression on embeddings** | **1.000** |
-
-The gate is a **hybrid**: that classifier decides every confident case, and an LLM
-decides only the uncertain band, `[0.20, 0.70)`. Real KOs almost never land there — 98.7%
-of even the Economics/Society/Environment-only ones are accepted outright — so on a
-real corpus the LLM sees a small minority of records. Its scope comes from
-`data_model.topics.json`. Use `--no-gate-llm` for a classifier-only gate with no LLM
-calls. Details and the prompt's failure history are in `METHODS.md` section 1.
-
-The 10,468 real KOs define the domain far better than a thesaurus does. At the
-calibrated threshold: **100% of real KOs kept in all 14 languages**, 94.6% of
-off-domain caught. It is not set higher because a language gap opens above 0.60 —
-at 0.70, German retention falls to 83% and Greek to 33%, and roughly a third of the
-corpus is not in English.
-
-### Why compliance is not in the score
-
-As a scored component, metadata completeness correlated with reviewer judgement at
-**-0.217** (p=0.039) — the wrong direction. A thorough record is not the same thing as
-good content. Completeness still matters, as an obligation, so it is a checklist.
-
-### What the score is made of
-
-Of sixteen sub-scores in the previous design, eleven had no relationship with reviewer
-judgement, one ran backwards, and the rest were dominated by two measurements.
-
-| scorer | ρ vs human | % of ceiling |
+| stage | question | affects the score |
 |---|---|---|
-| old four-pillar total | 0.174 | 21% |
-| four pillars, *optimally* reweighted | -0.170 | below chance |
-| **content depth + lexical variety** | **0.526** | **62%** |
+| 1 gate | Is the KO about agriculture in the broad sense (farming, forestry, livestock, food, rural life, and their economics, environment and society)? | off-domain KOs are not scored |
+| 2 compliance | Are the fields every record carries filled in, with values from the current vocabularies? Optional fields are never a failure; old vocabulary values are reported as drift; age is reported, not failed. | no |
+| 3 content | What is the file itself like? The published web-text quality filters (Gopher, C4, FineWeb, FineWeb2), declared vs detected language, lexical diversity, readability, DOIs and links. | no |
+| 4 metadata score | How well do title, subtitle, description and keywords describe the file? | **the score, 0-100** |
+| 5 LLM review | Is each field correct? If not, what should it say? A proposal is kept only if it scores higher without becoming less faithful to the file. | proposals are scored by stage 4 |
+| 6 analysis | Why is a score low, and would the ranking change under other weights? | no |
 
-Ridge regression given free choice of weights over the four pillars scored below
-chance, so the failure was never the 30/35/25/10 split — it was the contents.
+### The score
 
-Two specifics worth keeping in mind when changing anything here:
+Each field is scored on three pillars and ten sub-pillars, then averaged with equal weights:
 
-- **Type-token ratio was inverted.** It falls mechanically with length (ρ = -0.93), so
-  93.7% of the corpus scored 5/5 and failed extractions scored best. Replaced with
-  MTLD, which is length-robust: -0.29 → **+0.47**.
-- **Banding destroys signal.** Discretising content length into 0-5 bands lost 53% of
-  it, because the band table penalised documents over 6,000 tokens while reviewers
-  consistently preferred longer ones. The score uses continuous inputs.
+| pillar | sub-pillars |
+|---|---|
+| **Structural** - is the field well-formed? | length (published limits) · completeness (present, not a placeholder or copy) · noise (markup, URLs, encoding debris) · formatting (casing, line breaks, keyword list form) |
+| **Semantic** - is it correct and informative? | consistency (supported by the file, coherent with the other fields) · density (specific rather than generic words) · clarity (not cut off, acronyms explained, readable) · usefulness (covers the file's key terms, adds to the title, keywords not repetitive) |
+| **Functional** - can search find the KO by it? | BM25 findability · semantic findability (search every KO with the field; where does this KO rank?) |
 
-The ceiling is **0.847**: two reviewers agree with each other at ρ 0.558, and no scorer
-can exceed the square root of the criterion's reliability.
+The same scorer scores three sets of metadata, so they can be compared directly: the
+contributor's, the LLM-improved `*_llm` fields already in the export, and stage 5's
+proposals.
+
+---
+
+## Outputs
+
+Each run writes a folder, `output/run_<timestamp>/` or `--output-dir`:
+
+| file | one row per | what to look at |
+|---|---|---|
+| `kos.tsv` | KO | `metadata_score` (contributor) and `metadata_score_llm_fields` (existing `*_llm`), `delta`, pillar and field scores, `weakest` (the lowest sub-pillars with the reason), gate, compliance and content flags |
+| `fields.tsv` | KO × metadata set × field | every sub-pillar value |
+| `llm_review.tsv` | KO × field (with `--llm-review`) | verdict, failing criteria, proposal, both scores, decision, and `disagreement` where the model says "correct" but the measurement says weak |
+| `selftest.tsv` | KO × deliberate defect (with `--selftest`) | whether each sub-pillar noticed |
+| `analysis.json` | run | rank stability under alternative weights, redundant sub-pillars, length bias, self-test totals |
+| `details.jsonl` | KO | everything, including the evidence behind each sub-pillar |
+| `run.json` | run | arguments, selection, settings version, corpus fingerprint, timing |
+
+**Reading a low score.** Start from `weakest`: it names the field, the sub-pillar and the
+reason, for example `title.bm25_findability=0.08 ranks 8628 of 10468 when used as a
+search query`, or `description.clarity=0.33 unexplained acronyms: GESVAC`.
 
 ---
 
 ## Layout
 
-| Path | What |
+| path | what |
 |---|---|
-| `pipeline.py` | The entry point. Everything else is a component of it. |
-| `core/` | Measurement. `text_utils`, `io_utils`, `llm`, and the four metric modules. |
-| `stages/` | `gate`, `compliance`, `scoring`, `diagnostics`, `llm_judge`. |
-| `validation/` | `validate_metrics`, `human_review`, learned profiles, gate model. |
-| `tools/` | Standalone analyses: content and compression diagnostics, anchor builders. |
-| `legacy/` | The superseded generation, frozen and self-contained. Do not extend. |
-| `docs/` | Longer write-ups. |
-| `data/` | Human review workbook and other local inputs. |
-| `anchors/` | AGROVOC / NALT anchor texts and the old centroid. |
+| `pipeline.py` | the entry point; selection and orchestration |
+| `stages/` | `gate`, `compliance`, `metadata_score`, `metadata_llm`, `analysis` |
+| `core/` | `corpus_index` (search index, frequencies, baselines), `metadata_metrics` (the ten sub-pillars, NLI), `content_report` (web-text filters), `llm`, `text_utils`, `io_utils` |
+| `validation/` | `metadata_spec.json` (settings), `compliance_profile.json`, `gate_validation/`, `runs/` (evidence such as the NLI comparison) |
+| `tools/` | `score_metadata` (scoring and self-test on their own), `compare_nli` (NLI model choice), `md_to_docx` (the Word guide), older standalone analyses |
+| `legacy/` | superseded generations, including `reviewer_fitted/` (the score fitted to the 2024 human review); nothing active imports them |
+| `docs/` | longer write-ups and the presentation |
 
 ---
 
-## Nothing here is a hand-written list
+## Nothing is a hand-written list
 
-| Thing | Where it comes from |
+| thing | where it comes from |
 |---|---|
-| Controlled vocabularies | Globbed from `data_model_v2/`; field name from the filename |
-| Which fields are obligations | Corpus coverage, then an LLM classifies contributor / system / derived |
-| Staleness cut-off | A percentile of the corpus's completion years |
-| Diagnostic thresholds | Per-metric tails learned from the corpus |
-| The judge's rubric | The question texts in the human review workbook itself |
-| Which LLM is used | `GET /v1/models`, matched against a preference expression |
-| Score weights | Fitted against human review; refit with `validation/validate_metrics.py` |
-
-Refit the corpus-derived profiles with `--learn` whenever the export changes.
+| length rules | published external sources only: the EIP-AGRI Common Format (title) and Google's Dataset guidelines (description), quoted in `LITERATURE_REVIEW.md` §3.1; none where no source gives a number |
+| controlled vocabularies | globbed from `data_model_v2/` |
+| required fields | filled on every record (the form enforces them), and contributor-supplied |
+| generic vs specific words | platform document frequencies and general-language word frequencies (wordfreq) for each language found |
+| stop words | each language's commonest words (wordfreq), as FineWeb2 does |
+| "similar enough", "coherent enough" | chance baselines learned from random corpus keywords and KOs |
+| scale anchors | the corpus's own 5th-95th percentiles |
+| the NLI model | chosen by measurement (`tools/compare_nli.py`) |
 
 ---
 
-## Validating and recalibrating
+## Recalibrating
 
 ```bash
-python -m validation.validate_metrics                       # metrics vs human review
-python -m validation.validate_metrics --calibrate --kos ../input/export.json
-python -m stages.gate --calibrate                           # refit the domain gate
+python pipeline.py --learn --limit 1          # compliance profile (1 LLM call)
+python -m stages.gate --calibrate             # domain gate
+python -m tools.compare_nli --limit 40        # NLI model
+python -m tools.md_to_docx METHODS.md LITERATURE_REVIEW.md \
+    --out How_the_KO_quality_pipeline_works.docx --title "How the KO quality pipeline works"
 ```
-
-`validate_metrics` reports the inter-rater ceiling, per-metric correlations with
-partial-on-length, a cross-validated feature-set comparison against a permutation
-baseline, and robustness across content-length floors.
-
-**The rule this folder is built on:** nothing enters the score until it has been
-measured against human judgement. The LLM judge is a good instrument — gpt-oss-120b
-reaches ρ 0.491 with no fitting at all — but it correlates 0.65 with the existing
-signal and adds 0.009 when combined, so it is reported as diagnostics, not scored.
-A bigger model is not an exemption from validation.
 
 ---
 
 ## LLM access
 
-Configuration and quirks are documented in [`../USING_LLMS.md`](../USING_LLMS.md).
-`core/llm.py` adapts `semantic_vs_search/llm_client.py` (disk caching, retries,
-`reasoning_effort` handling) and adds runtime model discovery. Set `KOQ_LLM_MODEL` to a
-preference expression such as `"gpt-oss"` to pin a family without pinning a checkpoint.
+Configuration and quirks: [`../USING_LLMS.md`](../USING_LLMS.md). `core/llm.py` adapts
+`semantic_vs_search/llm_client.py` (disk cache, retries, `reasoning_effort` handling) and
+resolves a model preference against the provider's model list. Everything except the
+gate's uncertain band and the optional review works offline.
 
-Everything degrades without an LLM: the gate, the score and the corpus-derived
-thresholds all work offline. Only field-role classification and the judge need one.
+New dependency: `wordfreq` (Apache-2.0 code, CC BY-SA 4.0 data), for general-language
+word frequencies. Install with `pip install wordfreq`.
+
+---
+
+## Latest run
+
+Run of 20 KOs, one per language (Bulgarian, Croatian, Czech, Danish, Dutch, Finnish, French, German, Greek, Hungarian, Irish, Italian, Latvian, Lithuanian, Polish, Portuguese, Romanian, Slovene, Spanish, Swedish); seed 42;
+`python pipeline.py --limit 20 --selftest`. Output folder: `output/run_final_20ko_v4/`.
+No LLM calls beyond the gate's uncertain band (3 KOs, answered from cache).
+
+**Gate and checks.** 0 of 20 rejected by the gate. Compliance: every KO complete. Content
+report: 4 files flagged by at least one web-text filter; declared language
+differs from the detected one on 5.
+
+**Metadata score** (mean, 0-100): the contributor's metadata against the LLM-improved
+`*_llm` fields already in the export, on identical criteria.
+
+| | contributor | existing `*_llm` |
+|---|---|---|
+| overall | 80.2 | 79.2 |
+| structural | 98.8 | 99.6 |
+| semantic | 71.5 | 68.5 |
+| functional | 70.4 | 69.4 |
+| title | 82.5 | 77.1 |
+| subtitle (n=3 / 18) | 82.3 | 79.8 |
+| description | 79.4 | 80.2 |
+| keywords | 79.0 | 80.9 |
+
+The `*_llm` version scored more than a point higher on 8 KOs and lower on 8. It
+is stronger structurally and on descriptions and keywords, and weaker on titles and on
+the semantic pillar - partly because it rewrote several non-English titles in English.
+
+**Self-test:** 232 of 240 deliberate defects detected
+(97%).
+
+| sub-pillar | detected |
+|---|---|
+| bm25_findability | 19 / 20 |
+| clarity | 20 / 20 |
+| completeness | 20 / 20 |
+| consistency | 40 / 40 |
+| density | 18 / 20 |
+| formatting | 20 / 20 |
+| length | 20 / 20 |
+| noise | 20 / 20 |
+| semantic_findability | 19 / 20 |
+| usefulness | 36 / 40 |
+
+The misses are cases where the original was already at the floor (a title that ranks
+8,628th of 10,468 cannot be made less findable) and the cross-language coverage limit
+described in METHODS.md §12.
+
+**Robustness** (OECD/JRC step): Spearman correlation of the KO ranking with the
+equal-weights ranking under data-driven weights - pillars: entropy 0.953,
+CRITIC 0.964, PCA 0.983; sub-pillars: entropy
+0.967, CRITIC 0.992, PCA 0.992. Rankings
+barely change under other defensible weights. No sub-pillar pair is redundant
+(|rho| >= 0.9); the strongest length association is clarity (rho -0.451).
+
+**LLM review** (tested earlier on 10 KOs, under the previous length rules; 9 calls):
+14 of 40 fields replaced; 5 proposals rejected as
+less faithful to the file and 2 as not measurably better; 11
+fields judged correct and kept. Rerun with `--llm-review --llm-limit 10` (10 calls) to
+repeat it under the current rules.

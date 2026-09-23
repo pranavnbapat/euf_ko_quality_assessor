@@ -116,6 +116,7 @@ USING_LLMS.md
 # KO quality pipeline: docs and fitted artifacts
 !assess_ko_quality/README.md
 !assess_ko_quality/METHODS.md
+!assess_ko_quality/LITERATURE_REVIEW.md
 !assess_ko_quality/validation/*.json
 !assess_ko_quality/validation/gate_validation/*.json
 !assess_ko_quality/validation/runs/*.md
