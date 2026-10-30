@@ -8,6 +8,10 @@ evaluated for that field. Nothing is scored against an opinion: every sub-pillar
 count, a rank, a model probability, or a published cut-off, and the same inputs always
 give the same output.
 
+"The file" below means the KO's reference text, set by `reference.source` in the spec:
+its summary (ko_content_flat_summarised, the default) or the file's own text (see
+corpus_index.reference_text).
+
     STRUCTURAL   length ........ within the published limits for the field
                  completeness .. present, not a filename, not a copy of another field,
                                  not shared verbatim with unrelated projects
@@ -16,10 +20,10 @@ give the same output.
                  formatting .... field-specific form: casing, stray line breaks, keyword
                                  lists split and de-duplicated
 
-    SEMANTIC     consistency ... accuracy: does the file support the field? (NLI, SummaC
-                                 zero-shot rule, Laban et al. 2022) and coherence: do the
-                                 fields describe the same thing? (vs chance) - both as
-                                 operationalised by Ochoa & Duval (2009)
+    SEMANTIC     consistency ... accuracy: does the file support the field? (NLI, adapted
+                                 from SummaC's zero-shot rule, Laban et al. 2022) and
+                                 coherence: do the fields describe the same thing? (vs
+                                 chance) - both as defined by Ochoa & Duval (2006)
                  density ....... how specific the words are: platform IDF and general
                                  word frequency in the field's language (wordfreq)
                  clarity ....... not visibly cut off, acronyms explained somewhere, readable
@@ -29,7 +33,8 @@ give the same output.
 
     FUNCTIONAL   bm25 .......... search the whole corpus with the field: where does this
                  semantic ...... KO rank? (known-item retrievability, Azzopardi & Vinay
-                                 2008; gain 1/log2(1+rank), Jarvelin & Kekalainen 2002)
+                                 2008; gain 1/log2(1+rank), the nDCG discount of
+                                 Burges et al. 2005)
 """
 from __future__ import annotations
 
@@ -147,6 +152,14 @@ class KOContext:
     evaluable: bool
     notes: List[str] = dc_field(default_factory=list)
     file_name: Any = None
+    ref_lang: str = "unknown"          # detected from the reference text itself
+    xling: Dict[str, Any] = dc_field(default_factory=dict)   # spec cross_lingual
+    # The English version of a non-English reference (--resummarise on a non-English
+    # document): the secondary reference for lexical checks on fields written in English.
+    alt_lang: str = "unknown"
+    alt_token_set: set = dc_field(default_factory=set)
+    alt_chunk_vecs: Optional[np.ndarray] = None
+    alt_null_threshold: float = 1.0
 
 
 def build_context(rec: Dict[str, Any], idx: CorpusIndex, emb: Embedder,
@@ -154,7 +167,7 @@ def build_context(rec: Dict[str, Any], idx: CorpusIndex, emb: Embedder,
     from core.corpus_index import ko_id, project_key, reference_text
 
     cfg = spec["reference"]
-    ref = reference_text(rec, cfg["max_chars"])
+    ref = reference_text(rec, cfg["max_chars"], cfg.get("source", "file"))
     toks = word_tokens(ref)
     pos = idx.pos.get(ko_id(rec))
     lang = idx.langs[pos] if pos is not None else "unknown"
@@ -172,12 +185,41 @@ def build_context(rec: Dict[str, Any], idx: CorpusIndex, emb: Embedder,
     notes = [] if evaluable else [f"reference text under {cfg['min_chars']} characters"]
     if pos is None:
         notes.append("KO not in the corpus index; findability not evaluable")
+    from core.corpus_index import _detect
+
+    # Detected fresh from the reference text itself, not from the corpus build, so a
+    # summary swapped in by --resummarise carries its own language here.
+    ref_lang = _detect(ref[:1000])
+
+    # The English version of a non-English reference, for fields written in English.
+    alt_lang, alt_tokens, alt_vecs, alt_thr = "unknown", set(), None, 1.0
+    alt = str(rec.get("_summary_en") or "").strip()
+    if alt and alt != ref:
+        alt_lang = _detect(alt[:1000])
+        if alt_lang != ref_lang:
+            alt_tokens = set(word_tokens(alt))
+            alt_chunks = chunk_words(alt, int(cfg["chunk_words"]), int(cfg["max_chunks"]))
+            if alt_chunks:
+                alt_vecs = emb.passages(alt_chunks)
+                if len(alt_vecs) and idx.null_term_vecs is not None and len(idx.null_term_vecs):
+                    best = (idx.null_term_vecs @ alt_vecs.T).max(axis=1)
+                    alt_thr = float(np.percentile(best, spec["coverage"]["null_percentile"]))
+        else:
+            alt_lang = "unknown"
+
     return KOContext(
         pos=pos, lang=lang, project=project_key(rec), ref_text=ref, ref_tokens=toks,
         ref_token_set=set(toks), ref_lower=ref.lower(), chunks=chunks, chunk_vecs=vecs,
-        key_terms=idx.key_terms(toks, int(spec["coverage"]["key_terms"])) if evaluable else [],
+        # The reference's own language joins the stopword filter, so a reference in a
+        # language few corpus KOs share does not yield its function words as key terms.
+        key_terms=idx.key_terms(toks, int(spec["coverage"]["key_terms"]),
+                                extra_langs=(ref_lang,)) if evaluable else [],
         keyword_null_threshold=thr, evaluable=evaluable, notes=notes,
         file_name=rec.get((spec.get("title_rules") or {}).get("file_name_field", "ko_object_name")),
+        ref_lang=ref_lang,
+        xling=dict(spec.get("cross_lingual") or {}),
+        alt_lang=alt_lang, alt_token_set=alt_tokens, alt_chunk_vecs=alt_vecs,
+        alt_null_threshold=alt_thr,
     )
 
 
@@ -381,31 +423,82 @@ def formatting(field: str, value: Any, idx: CorpusIndex) -> Result:
 
 
 # --------------------------------------------------------------------- semantic
+def _matches_language(text: str, lang: str, cfg: Dict[str, Any]) -> Optional[bool]:
+    """
+    Does the text read as words of `lang`? The one question lexical matching needs,
+    answered via wordfreq: the share of alphabetic tokens that are known words of
+    that language. Open-set detection (langdetect) misfires on short fields
+    ("personal development, dairy farming" reads as French); the share test is
+    robust and one-sided. None when it cannot be decided: too few tokens, an unknown
+    language, or one wordfreq does not cover.
+    """
+    toks = [tok for tok in word_tokens(text) if tok.isalpha()]
+    if len(toks) < int(cfg.get("min_tokens", 2)) or lang in ("", "unknown"):
+        return None
+    try:
+        from wordfreq import available_languages, zipf_frequency
+
+        if lang not in available_languages():
+            return None
+        floor = float(cfg.get("known_word_zipf", 2.0))
+        known = sum(zipf_frequency(tok, lang) >= floor for tok in toks)
+    except Exception:
+        return None
+    return known / len(toks) >= float(cfg.get("known_share", 0.5))
+
+
+def cross_lingual(text: str, ctx: KOContext) -> bool:
+    """
+    True when the field clearly does not read as the reference text's language, so the
+    purely lexical parts are not evaluable: left out of their means, never zeroed, like
+    every other part that cannot be measured. An undecidable case never gates.
+    """
+    return _matches_language(text, ctx.ref_lang, ctx.xling) is False
+
+
 def _accuracy(field: str, value: Any, text: str, ctx: KOContext, emb: Embedder, nli: NLI,
-              spec: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
+              spec: Dict[str, Any]) -> Tuple[Optional[float], Dict[str, Any]]:
     """
     Accuracy in Ochoa & Duval's sense: how close the field is to what the file says.
 
     Text fields: each claim (the title, the subtitle, each description sentence) is
     checked against the two passages of the file most similar to it. The claim scores
-    max(P(entailment) - P(contradiction)) over those passages, which is SummaC's
-    zero-shot rule; the field scores the mean, mapped from [-1, 1] to [0, 1].
+    max(P(entailment) - P(contradiction)) over those passages, adapted from SummaC's
+    zero-shot rule (max over premises, mean over claims); the field scores the mean,
+    mapped from [-1, 1] to [0, 1].
     Keywords: the share of terms that occur in the file or sit closer to it than
     chance, where chance is learned from random corpus keywords. A term absent from
     the text can still be right (Meng et al. 2017's "absent keyphrases").
     """
     if field == "keywords":
+        # Measured against whichever summary the keywords share a language with: the
+        # reference, or its English version (--resummarise on a non-English document).
+        against = None
+        if not cross_lingual(text, ctx):
+            against = (ctx.ref_token_set, ctx.chunk_vecs, ctx.keyword_null_threshold, None)
+        elif ctx.alt_chunk_vecs is not None and len(ctx.alt_chunk_vecs) and \
+                _matches_language(text, ctx.alt_lang, ctx.xling):
+            against = (ctx.alt_token_set, ctx.alt_chunk_vecs, ctx.alt_null_threshold,
+                       f"measured against the English version of the summary ({ctx.alt_lang})")
+        if against is None:
+            return None, {"reason": f"keywords are in neither the reference's language "
+                                    f"({ctx.ref_lang}) nor its English version's; the "
+                                    "literal match and the same-language chance "
+                                    "threshold are not evaluable"}
+        token_set, chunk_vecs, thr, note = against
         terms = split_keywords(value)
         vecs = emb.queries(terms)
-        sims = (vecs @ ctx.chunk_vecs.T).max(axis=1)
+        sims = (vecs @ chunk_vecs.T).max(axis=1)
         supported = []
         for t, s in zip(terms, sims):
             toks = word_tokens(t)
-            lexical = bool(toks) and all(x in ctx.ref_token_set for x in toks)
-            supported.append(lexical or float(s) > ctx.keyword_null_threshold)
-        return sum(supported) / len(terms), {
-            "unsupported": [t for t, ok in zip(terms, supported) if not ok],
-            "threshold": round(ctx.keyword_null_threshold, 4)}
+            lexical = bool(toks) and all(x in token_set for x in toks)
+            supported.append(lexical or float(s) > thr)
+        ev = {"unsupported": [t for t, ok in zip(terms, supported) if not ok],
+              "threshold": round(thr, 4)}
+        if note:
+            ev["against"] = note
+        return sum(supported) / len(terms), ev
 
     if field in ("title", "subtitle"):
         claims = [f"This text is about {text.rstrip('.')}."]
@@ -456,7 +549,7 @@ def consistency(field: str, value: Any, ctx: KOContext, others: Dict[str, Any],
                 emb: Embedder, nli: NLI, idx: CorpusIndex, spec: Dict[str, Any]) -> Result:
     """
     Bruce & Hillmann's "accuracy" and "logical consistency and coherence", as
-    operationalised by Ochoa & Duval (2009): the mean of agreement with the file and
+    defined by Ochoa & Duval (2006): the mean of agreement with the file and
     agreement with the KO's other descriptive fields.
     """
     text = field_text(field, value)
@@ -465,7 +558,9 @@ def consistency(field: str, value: Any, ctx: KOContext, others: Dict[str, Any],
     parts: Dict[str, float] = {}
     detail: Dict[str, Any] = {}
     if ctx.evaluable and len(ctx.chunk_vecs):
-        parts["accuracy"], detail["accuracy"] = _accuracy(field, value, text, ctx, emb, nli, spec)
+        acc, detail["accuracy"] = _accuracy(field, value, text, ctx, emb, nli, spec)
+        if acc is not None:
+            parts["accuracy"] = acc
     coh, detail["coherence"] = _coherence(field, text, others, emb, idx)
     if coh is not None:
         parts["coherence"] = coh
@@ -584,7 +679,10 @@ def usefulness(field: str, value: Any, ctx: KOContext, others: Dict[str, Any],
     parts: Dict[str, float] = {}
     detail: Dict[str, Any] = {}
 
-    if ctx.evaluable and ctx.key_terms:
+    if ctx.evaluable and ctx.key_terms and cross_lingual(text, ctx):
+        detail["coverage"] = (f"not evaluable: field not in the reference's language "
+                              f"({ctx.ref_lang})")
+    elif ctx.evaluable and ctx.key_terms:
         ftoks = set(word_tokens(text))
         fvec = emb.passages([text])[0]
         null = idx.null_term_vecs @ fvec if idx.null_term_vecs is not None else np.array([1.0])
@@ -597,7 +695,9 @@ def usefulness(field: str, value: Any, ctx: KOContext, others: Dict[str, Any],
         detail["missed"] = [t for t in ctx.key_terms if t not in covered]
 
     if field == "keywords":
-        div, detail["diversity"] = keyword_diversity(value, ctx.lang, emb, idx)
+        # Stemmer of the reference's language (the document's own with --resummarise).
+        div, detail["diversity"] = keyword_diversity(
+            value, ctx.ref_lang if ctx.ref_lang != "unknown" else ctx.lang, emb, idx)
         if div is not None:
             parts["diversity"] = div
 
@@ -653,9 +753,18 @@ def keyword_diversity(value: Any, lang: str, emb: Embedder,
 def bm25_findability(field: str, value: Any, ctx: KOContext, idx: CorpusIndex) -> Result:
     if ctx.pos is None or not ctx.evaluable:
         return None, {"reason": "not evaluable"}
-    toks = word_tokens(field_text(field, value))
+    text = field_text(field, value)
+    toks = word_tokens(text)
     if not toks:
         return None, {}
+    # Findability is a corpus property, and the corpus is indexed on the export's
+    # (English) summaries: a query in a language only this KO's row carries would rank
+    # first without competition. So the gate is the corpus's language, not the
+    # reference's; the same thing while the reference is English.
+    corpus_lang = idx.corpus_language
+    if _matches_language(text, corpus_lang, ctx.xling) is False:
+        return None, {"reason": f"field not in the corpus index's language ({corpus_lang}); "
+                                "lexical search not evaluable"}
     rank = idx.rank_bm25(toks, ctx.pos)
     return _gain(rank), {"rank": rank, "of": idx.n_docs}
 
@@ -675,5 +784,5 @@ __all__ = [
     "SUBPILLARS", "NLI", "KOContext", "build_context",
     "length", "completeness", "noise", "formatting",
     "consistency", "density", "clarity", "usefulness",
-    "bm25_findability", "semantic_findability",
+    "bm25_findability", "semantic_findability", "cross_lingual", "_matches_language",
 ]

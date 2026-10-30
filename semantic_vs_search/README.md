@@ -154,6 +154,61 @@ folder.
 Use `--id-field _id`, not `@id`: the sheet records the parent document id the
 search API returns, which joins to the export's `_id`.
 
+### Evidence that costs nothing: `behavioural_signals.py`
+
+Grading is expensive and may never happen. But every search is already logged,
+and people leave evidence of whether one worked: they search again, they page
+past the first ten, they repeat themselves, they give up.
+
+```bash
+# 1. on the server, where ClickHouse resolves
+python behavioural_signals.py export --out sessions.json --days 90
+
+# 2. anywhere
+python behavioural_signals.py analyse --sessions sessions.json
+python behavioural_signals.py validate --sessions sessions.json --judged judged.xlsx
+```
+
+`analyse` gives a failure rate per language, per query shape and per query, plus
+a ranked list of the real queries users fought with - which is a work queue, not
+just a number. `validate` correlates those signals against the LLM panel's
+grades, which is the closest thing to validating the panel that exists without a
+human.
+
+Stated plainly: reformulation is confounded. Someone may search again because
+they found what they wanted and moved on. These signals measure aggregate
+dissatisfaction, not per-document relevance, and a single query's rate means
+nothing. Read them in bulk.
+
+### The measurement that is not a proxy: `experiment`
+
+The confound above cancels when the same signal is compared between two arms of
+a live A/B, because it applies equally to both. That makes this the only
+measurement in this folder that rests on nothing invented:
+
+```bash
+python behavioural_signals.py experiment --sessions sessions.json --aa   # first
+python behavioural_signals.py experiment --sessions sessions.json --source frontend
+```
+
+Run the `--aa` pass first. It re-splits the same traffic by a hash unrelated to
+the experiment, so both "arms" are identical by construction; a significant
+result there means the measurement is broken and nothing after it can be
+believed.
+
+The report gives each arm's failure rate with intervals that **resample people,
+not searches** - searches by one person are correlated, and one frustrated user
+with forty searches is a single piece of evidence rather than forty. It also
+prints guardrails (latency, zero-result rate) and a power table saying how long
+the experiment must run to detect a given effect.
+
+Scout's side of this - assignment, the arm on every search event, and the
+settings each arm changes - is `scout/docs/AB_TESTING.md`. Both default to off.
+
+Checked against simulated traffic with a known answer: 1 of 20 null runs came
+out significant at p < 0.05 (nominal 5%), and a real 6-point effect was detected
+at 5k, 16.5k and 49.7k searches with the p-value strengthening throughout.
+
 ### What this test cannot tell you
 
 Stated in the report itself, and worth repeating:
@@ -168,10 +223,12 @@ Stated in the report itself, and worth repeating:
   chunks and indexes each; here each document is truncated to the model's context
   window. Long documents therefore do worse in this test than in production, and
   the multilingual model — with a 128-token limit — is affected most.
-- **Judged queries remain the only decisive evidence.** Thirty to fifty real
-  searches with someone marking which results were correct would settle both the
-  keyword/semantic weighting and the field ablation in
-  `which_fields_to_choose`. That is the single highest-value missing asset.
+- **Nothing here is decisive on its own.** Thirty to fifty real searches with
+  someone marking which results were correct would settle both the
+  keyword/semantic weighting and the field ablation in `which_fields_to_choose`.
+  Failing that, a live A/B (above) answers a narrower question - is this change
+  better? - without anyone grading anything, and answers it from real intent.
+  The two are complementary: judgement says *why*, behaviour says *whether*.
 
 ### Relationship to the rest of the repo
 

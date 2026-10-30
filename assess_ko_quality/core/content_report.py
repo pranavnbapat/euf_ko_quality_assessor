@@ -113,8 +113,8 @@ def _dup_ngram_char_frac(words: Sequence[str], n: int, text_len: int) -> float:
 def _stop_words(lang: str, n: int = 8) -> List[str]:
     """
     The language's n commonest words. Gopher's list is eight English words; FineWeb2
-    replaces it per language with frequent words from reference text. wordfreq's top
-    list plays that role here.
+    replaces it per language with the words above a frequency threshold in reference
+    text, at least eight. A fixed top-n from wordfreq is a simpler stand-in for that.
     """
     try:
         from wordfreq import available_languages, top_n_list

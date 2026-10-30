@@ -27,6 +27,12 @@ Stage 1 (on the server, where ClickHouse is reachable):
 Stage 2 (anywhere):
     python behavioural_signals.py analyse --sessions sessions.json
     python behavioural_signals.py validate --sessions sessions.json --judged judged.xlsx
+
+And once scout is running an experiment (SEARCH_EXPERIMENT), the same signals
+become a live A/B - the only measurement here that is not a proxy for anything:
+
+    python behavioural_signals.py experiment --sessions sessions.json --aa   # first
+    python behavioural_signals.py experiment --sessions sessions.json
 """
 
 from __future__ import annotations
@@ -81,9 +87,23 @@ def cmd_export(args: argparse.Namespace) -> None:
     # Ordered by actor then time so sessions can be reconstructed by scanning.
     # user_uuid when present, ip otherwise: there is no session id in the schema,
     # and an ip is a coarse but workable stand-in for one person's sitting.
+    auth = base64.b64encode(
+        f"{env.get('CLICKHOUSE_USER','')}:{env.get('CLICKHOUSE_PASSWORD','')}".encode()).decode()
+
+    # experiment_arm and latency_ms arrived later than the rest of the schema, so
+    # ask the table what it has rather than assuming. A missing column would
+    # otherwise fail the whole export with a syntax error.
+    available = _describe(base, db, args.table, auth)
+    wanted = ["ts", "original_query", "detected_lang", "results_count", "page",
+              "user_uuid", "ip", "user_agent", "search_source", "endpoint",
+              "total_records", "experiment_arm", "latency_ms"]
+    columns = [c for c in wanted if not available or c in available]
+    missing = [c for c in wanted if available and c not in available]
+    if missing:
+        log.warning("Table %s has no %s; continuing without", args.table, ", ".join(missing))
+
     sql = f"""
-        SELECT ts, original_query, detected_lang, results_count, page,
-               user_uuid, ip, user_agent, search_source, endpoint, total_records
+        SELECT {', '.join(columns)}
         FROM {args.table}
         WHERE ts >= now() - INTERVAL {int(args.days)} DAY
           AND status_code = 200
@@ -93,8 +113,6 @@ def cmd_export(args: argparse.Namespace) -> None:
         FORMAT JSONEachRow
     """
     url = f"{base}/?{urllib.parse.urlencode({'database': db, 'query': sql})}"
-    auth = base64.b64encode(
-        f"{env.get('CLICKHOUSE_USER','')}:{env.get('CLICKHOUSE_PASSWORD','')}".encode()).decode()
     log.info("Querying %s days of search events ...", args.days)
     try:
         request = urllib.request.Request(url, headers={"Authorization": "Basic " + auth})
@@ -125,6 +143,19 @@ def cmd_export(args: argparse.Namespace) -> None:
         json.dump(kept, fh, ensure_ascii=False)
     log.info("Wrote %s (%d events)", args.out, len(kept))
     print(f"\nNext: python behavioural_signals.py analyse --sessions {args.out}")
+
+
+def _describe(base: str, db: str, table: str, auth: str) -> set[str]:
+    """Column names of a table, or an empty set if the question cannot be asked."""
+    query = urllib.parse.urlencode({"database": db, "query": f"DESCRIBE TABLE {table} FORMAT TSV"})
+    try:
+        request = urllib.request.Request(f"{base}/?{query}",
+                                         headers={"Authorization": "Basic " + auth})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8")
+    except Exception:  # noqa: BLE001 - fall back to asking for everything
+        return set()
+    return {line.split("\t")[0] for line in body.splitlines() if line.strip()}
 
 
 def _actor_key(row: dict[str, Any]) -> str:
@@ -453,6 +484,259 @@ def _pearson(xs: list[float], ys: list[float]) -> float:
 
 # -------------------------------------------------------------------- main ---
 
+# ---------------------------------------------------------------------------
+# Experiment analysis
+# ---------------------------------------------------------------------------
+
+def _z(p: float) -> float:
+    """Inverse normal CDF, good to ~4.5e-4. Enough for a power calculation."""
+    if p <= 0 or p >= 1:
+        raise ValueError("p must be in (0, 1)")
+    # Abramowitz & Stegun 26.2.23, mirrored about the median.
+    sign, q = (1.0, p) if p > 0.5 else (-1.0, 1.0 - p)
+    t = math.sqrt(-2.0 * math.log(1.0 - q))
+    num = 2.515517 + 0.802853 * t + 0.010328 * t * t
+    den = 1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t
+    return sign * (t - num / den)
+
+
+def cluster_bootstrap(by_actor: dict[str, list[dict[str, Any]]],
+                      arms: dict[str, list[str]],
+                      rounds: int,
+                      seed: int) -> dict[str, Any]:
+    """Failure rates and their difference, resampling PEOPLE rather than searches.
+
+    Searches by one person are not independent: someone who reformulates once
+    tends to reformulate again, and a single frustrated user with forty searches
+    would otherwise look like forty pieces of evidence. Resampling at the level
+    the experiment randomised at - the person - carries that correlation into
+    the interval instead of pretending it away. On this data it roughly doubles
+    the width of the interval, which is the honest width.
+    """
+    import random
+    rng = random.Random(seed)
+
+    def rate(actor_ids: list[str]) -> tuple[float, int]:
+        failed = total = 0
+        for actor in actor_ids:
+            for row in by_actor[actor]:
+                total += 1
+                failed += row["outcome"] in FAILURE_OUTCOMES
+        return (failed / total if total else 0.0), total
+
+    names = sorted(arms)
+    observed = {name: rate(arms[name]) for name in names}
+    diffs: list[float] = []
+    per_arm: dict[str, list[float]] = {name: [] for name in names}
+    for _ in range(rounds):
+        sampled = {}
+        for name in names:
+            pool = arms[name]
+            picks = [pool[rng.randrange(len(pool))] for _ in range(len(pool))]
+            value, _ = rate(picks)
+            sampled[name] = value
+            per_arm[name].append(value)
+        if len(names) == 2:
+            diffs.append(sampled[names[1]] - sampled[names[0]])
+
+    out: dict[str, Any] = {"arms": {}}
+    for name in names:
+        value, n = observed[name]
+        series = sorted(per_arm[name])
+        out["arms"][name] = {
+            "rate": value,
+            "searches": n,
+            "actors": len(arms[name]),
+            "lo": series[int(0.025 * len(series))],
+            "hi": series[int(0.975 * len(series)) - 1],
+        }
+    if len(names) == 2 and diffs:
+        series = sorted(diffs)
+        # Two-sided, from the bootstrap distribution itself. The +1s stop a
+        # p-value of exactly 0, which no finite resample can justify.
+        below = sum(1 for d in diffs if d <= 0)
+        above = sum(1 for d in diffs if d >= 0)
+        out["diff"] = {
+            "value": observed[names[1]][0] - observed[names[0]][0],
+            "lo": series[int(0.025 * len(series))],
+            "hi": series[int(0.975 * len(series)) - 1],
+            "se": statistics.pstdev(diffs),
+            "p": min(1.0, 2.0 * (min(below, above) + 1) / (len(diffs) + 1)),
+            "baseline": names[0],
+            "treated": names[1],
+        }
+    return out
+
+
+def cmd_experiment(args: argparse.Namespace) -> None:
+    with open(args.sessions, "r", encoding="utf-8") as fh:
+        events = json.load(fh)
+
+    if not any("experiment_arm" in e for e in events):
+        sys.exit(
+            "No experiment_arm in this export, so there is nothing to compare.\n\n"
+            "Either the experiment is not running, or ClickHouse has no such column and the\n"
+            "arm is being discarded on insert. On the server:\n"
+            "  ALTER TABLE euf_search_analytics.search_events\n"
+            "    ADD COLUMN IF NOT EXISTS experiment_arm LowCardinality(String) DEFAULT '';\n"
+            "then re-export once traffic has accumulated."
+        )
+
+    if args.aa:
+        # An A/A split: assign every actor by a hash that has nothing to do with
+        # the experiment. Any 'significant' difference here is the measurement
+        # lying, not the configuration working - run this before believing an
+        # A/B result.
+        import hashlib
+        for row in events:
+            digest = hashlib.sha256(f"aa:{row.get('actor','')}".encode()).digest()
+            row["experiment_arm"] = "aa_left" if digest[0] < 128 else "aa_right"
+
+    sessions = build_sessions(events, args.session_gap)
+    rows = label_searches(sessions, args.follow_window, args.overlap)
+
+    lines: list[str] = []
+    lines.append("=== A/B: WHAT THE TWO CONFIGURATIONS DID TO REAL USERS ===")
+    if args.aa:
+        lines.append("MODE: A/A. Both arms are the same configuration, split by an unrelated")
+        lines.append("hash. A significant result here means the pipeline is broken.")
+        lines.append("")
+
+    # --- who is in the comparison at all ---
+    total = len(rows)
+    rows = [r for r in rows if (r.get("experiment_arm") or "").strip()]
+    unassigned = total - len(rows)
+
+    if args.source:
+        before = len(rows)
+        rows = [r for r in rows if (r.get("search_source") or "") == args.source]
+        lines.append(f"Restricted to search_source={args.source!r}: "
+                     f"{len(rows)} of {before} searches")
+    if args.endpoint:
+        rows = [r for r in rows if (r.get("endpoint") or "") == args.endpoint]
+
+    if not rows:
+        sys.exit("No assigned searches left after filtering.")
+
+    # --- an actor must be in exactly one arm ---
+    arms_by_actor: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        arms_by_actor[row.get("actor", "")].add(row["experiment_arm"])
+    crossed = {a for a, s in arms_by_actor.items() if len(s) > 1}
+    if crossed:
+        rows = [r for r in rows if r.get("actor") not in crossed]
+
+    by_actor: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_actor[row.get("actor", "")].append(row)
+    arms: dict[str, list[str]] = defaultdict(list)
+    for actor, group in by_actor.items():
+        arms[group[0]["experiment_arm"]].append(actor)
+
+    lines.append(f"Searches analysed   : {len(rows)}")
+    lines.append(f"Unassigned, excluded: {unassigned} "
+                 f"({100*unassigned/total:.1f}% - anonymous, or before the experiment began)")
+    lines.append(f"People              : {len(by_actor)}")
+    if crossed:
+        lines.append(f"People in BOTH arms : {len(crossed)}, excluded. Assignment should make")
+        lines.append("                      this impossible; more than a handful means an actor's")
+        lines.append("                      key is not stable and the split cannot be trusted.")
+    lines.append("")
+
+    # --- did the split come out as configured ---
+    lines.append("--- ASSIGNMENT ---")
+    for name in sorted(arms):
+        share = len(arms[name]) / len(by_actor)
+        lo, hi = wilson_interval(len(arms[name]), len(by_actor))
+        lines.append(f"  {name:12} {len(arms[name]):6} people ({100*share:5.1f}%) "
+                     f"[{100*lo:.1f}%, {100*hi:.1f}%]  {sum(len(by_actor[a]) for a in arms[name]):6} searches")
+    if len(arms) == 2:
+        counts = [len(arms[n]) for n in sorted(arms)]
+        lo, hi = wilson_interval(counts[0], sum(counts))
+        if not (lo <= 0.5 <= hi):
+            lines.append("  WARNING: the split is further from even than chance explains. Either the")
+            lines.append("  arms are weighted deliberately, or one arm is catching bot traffic.")
+    lines.append("")
+
+    if len(arms) < 2:
+        sys.exit("\n".join(lines) + "\n\nOnly one arm present; nothing to compare.")
+
+    # --- the outcome ---
+    result = cluster_bootstrap(by_actor, dict(arms), args.bootstrap, args.seed)
+    lines.append("--- APPARENT FAILURE RATE (zero + reformulated + repeat + page_2) ---")
+    lines.append("  Intervals resample people, not searches; see cluster_bootstrap.")
+    lines.append("")
+    for name in sorted(result["arms"]):
+        a = result["arms"][name]
+        lines.append(f"  {name:12} {100*a['rate']:5.1f}%  [{100*a['lo']:.1f}%, {100*a['hi']:.1f}%]"
+                     f"   n={a['searches']} searches / {a['actors']} people")
+
+    diff = result.get("diff")
+    if diff:
+        lines.append("")
+        direction = "BETTER" if diff["value"] < 0 else "WORSE"
+        lines.append(f"  {diff['treated']} vs {diff['baseline']}: "
+                     f"{100*diff['value']:+.2f} points "
+                     f"[{100*diff['lo']:+.2f}, {100*diff['hi']:+.2f}], p = {diff['p']:.3f}")
+        if diff["p"] < 0.05:
+            lines.append(f"  -> {diff['treated']} is {direction}. The interval excludes zero.")
+        else:
+            lines.append(f"  -> No detectable difference. The interval includes zero, so this is")
+            lines.append(f"     'not yet measurable', NOT 'the same'.")
+
+    # --- guardrails: things that must not get worse ---
+    lines.append("")
+    lines.append("--- GUARDRAILS ---")
+    for name in sorted(arms):
+        group = [r for a in arms[name] for r in by_actor[a]]
+        zero = sum(1 for r in group if int(r.get("results_count") or 0) == 0)
+        counts = sorted(int(r.get("results_count") or 0) for r in group)
+        lat = sorted(int(r["latency_ms"]) for r in group if r.get("latency_ms") is not None)
+        median_lat = lat[len(lat) // 2] if lat else None
+        p95 = lat[int(0.95 * len(lat))] if lat else None
+        lines.append(f"  {name:12} zero-result {100*zero/len(group):5.1f}%   "
+                     f"median results {counts[len(counts)//2]:3}   "
+                     + (f"latency p50 {median_lat}ms p95 {p95}ms" if lat else "latency not logged"))
+
+    # --- how long must this run ---
+    if diff:
+        lines.append("")
+        lines.append("--- HOW LONG TO RUN ---")
+        se = diff["se"]
+        span = _span_days(rows)
+        per_day = len(rows) / span if span else 0
+        z_alpha, z_beta = _z(1 - args.alpha / 2), _z(args.power)
+        lines.append(f"  Observed so far: {len(rows)} searches over {span:.1f} days "
+                     f"(~{per_day:.0f}/day), standard error {100*se:.2f} points.")
+        for mde in args.mde:
+            target_se = mde / (z_alpha + z_beta)
+            if se <= 0 or target_se <= 0:
+                continue
+            needed = len(rows) * (se / target_se) ** 2
+            more = max(0.0, needed - len(rows))
+            when = f"{more/per_day:.0f} more days" if per_day else "unknown - no time span"
+            verdict = "already enough" if more <= 0 else when
+            lines.append(f"  To detect {100*mde:.1f} points at {100*(1-args.alpha):.0f}% "
+                         f"confidence and {100*args.power:.0f}% power: "
+                         f"{needed:,.0f} searches -> {verdict}")
+        lines.append("  Stopping the moment a result turns significant inflates the false")
+        lines.append("  positive rate well past 5%. Pick a target above, then read it once.")
+
+    report = "\n".join(lines)
+    print(report)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(report + "\n")
+        log.info("Wrote %s", args.out)
+
+
+def _span_days(rows: list[dict[str, Any]]) -> float:
+    stamps = [parse_ts(r["ts"]) for r in rows if r.get("ts")]
+    if len(stamps) < 2:
+        return 0.0
+    return (max(stamps) - min(stamps)) / 86400.0
+
+
 def main() -> None:
     here = os.path.dirname(os.path.abspath(__file__))
     workspace = os.path.abspath(os.path.join(here, "..", ".."))
@@ -485,6 +769,22 @@ def main() -> None:
     p.add_argument("--min-bucket", type=int, default=50)
     p.add_argument("--min-query-n", type=int, default=5)
     p.set_defaults(func=cmd_analyse)
+
+    p = add_common(sub.add_parser("experiment", help="Compare A/B arms on real behaviour"))
+    p.add_argument("--sessions", default="sessions.json")
+    p.add_argument("--out", default=None, help="Also write the report to this path")
+    p.add_argument("--source", default=None,
+                   help="Keep only this search_source (e.g. the frontend's tag)")
+    p.add_argument("--endpoint", default=None, help="Keep only this endpoint")
+    p.add_argument("--bootstrap", type=int, default=2000)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--alpha", type=float, default=0.05)
+    p.add_argument("--power", type=float, default=0.80)
+    p.add_argument("--mde", type=float, nargs="+", default=[0.01, 0.02, 0.05],
+                   help="Effect sizes to size the run for, as proportions")
+    p.add_argument("--aa", action="store_true",
+                   help="Ignore the real arms and split by an unrelated hash, to test the pipeline")
+    p.set_defaults(func=cmd_experiment)
 
     p = add_common(sub.add_parser("validate", help="Check panel grades against behaviour"))
     p.add_argument("--sessions", default="sessions.json")

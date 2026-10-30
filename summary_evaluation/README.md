@@ -1,7 +1,7 @@
 # Summary Evaluation
 
 This folder is a curated copy of the useful evaluation code from
-[`which_model_to_choose/methods`](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/which_model_to_choose/methods).
+[`which_model_to_choose/methods`](../which_model_to_choose/methods).
 
 The goal is to keep the important evaluation logic in one clean place without
 changing the historical `methods` folder.
@@ -40,13 +40,13 @@ This folder keeps only the important evaluation code and documentation:
 
 Detailed per-script documentation:
 
-- [01_evaluate_chunks.md](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/summary_evaluation/01_evaluate_chunks.md)
-- [01_plot_evaluation.md](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/summary_evaluation/01_plot_evaluation.md)
-- [02_evaluate_chunks.md](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/summary_evaluation/02_evaluate_chunks.md)
-- [02_plot_evaluation_chunks.md](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/summary_evaluation/02_plot_evaluation_chunks.md)
-- [03_evaluate_chunks.md](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/summary_evaluation/03_evaluate_chunks.md)
-- [03_plot_nli_results.md](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/summary_evaluation/03_plot_nli_results.md)
-- [04_evaluate_chunks.md](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/summary_evaluation/04_evaluate_chunks.md)
+- [01_evaluate_chunks.md](01_evaluate_chunks.md)
+- [01_plot_evaluation.md](01_plot_evaluation.md)
+- [02_evaluate_chunks.md](02_evaluate_chunks.md)
+- [02_plot_evaluation_chunks.md](02_plot_evaluation_chunks.md)
+- [03_evaluate_chunks.md](03_evaluate_chunks.md)
+- [03_plot_nli_results.md](03_plot_nli_results.md)
+- [04_evaluate_chunks.md](04_evaluate_chunks.md)
 
 ## Intentionally Not Copied
 
@@ -76,10 +76,10 @@ The curated copies were adjusted so they are less brittle:
 Run the curated copies from the repo root.
 
 If `--input` is omitted, the evaluators use the newest file under the repo root
-[`input/`](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/input) folder.
+[`input/`](../input) folder.
 
 If `--output` is omitted, results are written under
-[`summary_evaluation/output/`](/home/pranav/PyCharm/EU-FarmBook/ko_quality_assessor/summary_evaluation/output).
+[`summary_evaluation/output/`](output).
 
 The scripts resolve these paths relative to the repo and script location, so
 they work whether you run them from the repo root or from inside

@@ -3,7 +3,8 @@
 What a score means for one KO, and how much the scores depend on our choices.
 
 explain()      the weakest sub-pillars of each field, with the evidence that produced
-               them, so a low score comes with a reason a contributor can act on.
+               them, and a low LLM score with the LLM's reason, so a low score comes with
+               a reason a contributor can act on.
 
 robustness()   the OECD/JRC Handbook's robustness step (2008; Saisana, Saltelli &
                Tarantola 2005): recompute the composite with other defensible weights
@@ -36,7 +37,7 @@ SUBS = [s for names in SUBPILLARS.values() for s in names]
 
 
 # --------------------------------------------------------------------- explanation
-def _evidence_note(sub: str, ev: Dict[str, Any]) -> str:
+def _evidence_note(sub: str, ev: Dict[str, Any], reference: str = "the file") -> str:
     """A short, plain reading of the evidence behind one sub-pillar."""
     if not isinstance(ev, dict):
         return ""
@@ -61,7 +62,7 @@ def _evidence_note(sub: str, ev: Dict[str, Any]) -> str:
         acc = (ev.get("accuracy") or {})
         bits = []
         if acc.get("unsupported"):
-            bits.append("not supported by the file: " + ", ".join(acc["unsupported"][:5]))
+            bits.append(f"not supported by {reference}: " + ", ".join(acc["unsupported"][:5]))
         if acc.get("weakest"):
             bits.append(f"weakest claim: \"{acc['weakest'][:90]}\"")
         coh = ev.get("coherence") or {}
@@ -83,7 +84,7 @@ def _evidence_note(sub: str, ev: Dict[str, Any]) -> str:
     if sub == "usefulness":
         bits = []
         if ev.get("missed"):
-            bits.append("misses the file's key terms: " + ", ".join(ev["missed"][:5]))
+            bits.append(f"misses the key terms of {reference}: " + ", ".join(ev["missed"][:5]))
         if ev.get("overlap_with_title") is not None and ev["overlap_with_title"] > 0.5:
             bits.append(f"repeats the title ({ev['overlap_with_title']:.0%} word overlap)")
         div = ev.get("diversity") or {}
@@ -94,8 +95,11 @@ def _evidence_note(sub: str, ev: Dict[str, Any]) -> str:
 
 
 def explain(variant_result: Optional[Dict[str, Any]], threshold: float = 0.5,
-            limit: int = 6) -> List[Dict[str, Any]]:
-    """The weakest sub-pillars across a KO's fields, weakest first."""
+            limit: int = 6, reference: str = "the file") -> List[Dict[str, Any]]:
+    """
+    The weakest sub-pillars across a KO's fields, weakest first. `reference` names what
+    the fields were checked against, for the reasons ("the summary", "the file").
+    """
     if not variant_result:
         return []
     items = []
@@ -103,7 +107,12 @@ def explain(variant_result: Optional[Dict[str, Any]], threshold: float = 0.5,
         for sub, v in (fr.get("subpillars") or {}).items():
             if v is not None and v < threshold:
                 items.append({"field": f, "subpillar": sub, "value": v,
-                              "why": _evidence_note(sub, (fr.get("evidence") or {}).get(sub))})
+                              "why": _evidence_note(sub, (fr.get("evidence") or {}).get(sub), reference)})
+        llm = fr.get("llm") or {}
+        # An empty field is already named by completeness; its LLM 0 adds nothing.
+        if fr.get("text") and llm.get("score") is not None and llm["score"] < 100 * threshold:
+            items.append({"field": f, "subpillar": "llm", "value": round(llm["score"] / 100.0, 4),
+                          "why": llm.get("reason") or ""})
     items.sort(key=lambda x: x["value"])
     return items[:limit]
 
@@ -224,4 +233,109 @@ def length_bias(rows: Sequence[Dict[str, Any]]) -> Dict[str, Optional[float]]:
     return out
 
 
-__all__ = ["explain", "robustness", "redundancy", "length_bias", "SUBS"]
+# --------------------------------------------------------------------- reference check
+def file_language_of(r: Dict[str, Any]) -> str:
+    """
+    The language group a KO belongs to for per-language anchoring: the file's own
+    language read from its pages (--resummarise), else the stored text's detected
+    code. Lowercased label; "unknown" when neither is known.
+    """
+    fl = (r.get("resummarised") or {}).get("file_language")
+    if fl:
+        return str(fl).strip().lower()
+    dl = (r.get("content") or {}).get("content_language_detected") or ""
+    return str(dl).strip().lower() if dl and dl != "unknown" else "unknown"
+
+
+def reference_flags(results: Sequence[Dict[str, Any]], min_n: int = 30) -> Dict[str, Any]:
+    """
+    Corpus-relative flags on the summary checks, attached in place.
+
+    No published source gives a universal compression ratio or support level, so
+    nothing absolute is imposed: the distribution marks the outliers (compression
+    outside p5-p95, NLI support or key-term coverage below p10), the same
+    learned-from-the-corpus principle the density anchors use.
+
+    Thresholds are anchored within each file-language group of at least `min_n`
+    checked KOs, because the cross-lingual readings (an English summary
+    against a non-English file) run systematically lower than same-language ones -
+    a run-wide percentile would flag the non-English KOs first for being
+    non-English. KOs in smaller groups fall back to the run-wide thresholds; each
+    check records its anchor (`flag_anchor`). Runs smaller than `min_n` keep only
+    the absolute flags (no summary, wrong language).
+    """
+    rows = [(r, r["summary_check"]) for r in results
+            if r.get("summary_check", {}).get("summary_present")]
+    checks = [c for _, c in rows]
+    if len(checks) < min_n:
+        return {"note": f"only {len(checks)} summaries checked; at least {min_n} "
+                        "needed for corpus-relative flags"}
+
+    def thresholds(cs: Sequence[Dict[str, Any]]) -> Dict[str, Optional[float]]:
+        def pct(key: str, q: float) -> Optional[float]:
+            vals = [c[key] for c in cs if c.get(key) is not None]
+            return round(float(np.percentile(vals, q)), 4) if vals else None
+        return {"compression_p5": pct("compression_ratio", 5),
+                "compression_p95": pct("compression_ratio", 95),
+                "support_p10": pct("nli_support", 10),
+                "coverage_p10": pct("key_term_coverage", 10)}
+
+    run_wide = thresholds(checks)
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for r, c in rows:
+        groups.setdefault(file_language_of(r), []).append(c)
+    anchored = {lang: thresholds(cs) for lang, cs in groups.items()
+                if len(cs) >= min_n and lang != "unknown"}
+
+    for r, c in rows:
+        lang = file_language_of(r)
+        t = anchored.get(lang, run_wide)
+        c["flag_anchor"] = (f"{lang} (n={len(groups[lang])})" if lang in anchored
+                            else f"run-wide (n={len(checks)})")
+        ratio = c.get("compression_ratio")
+        if ratio is not None and t["compression_p5"] is not None and \
+                not (t["compression_p5"] <= ratio <= t["compression_p95"]):
+            c["flags"].append("compression_outlier")
+        if c.get("nli_support") is not None and t["support_p10"] is not None \
+                and c["nli_support"] < t["support_p10"]:
+            c["flags"].append("low_nli_support")
+        if c.get("key_term_coverage") is not None and t["coverage_p10"] is not None \
+                and c["key_term_coverage"] < t["coverage_p10"]:
+            c["flags"].append("low_key_term_coverage")
+        c["reference_reliability"] = "check" if c["flags"] else "ok"
+    return {"thresholds": {"run-wide": run_wide,
+                           **{f"language:{k}": v for k, v in anchored.items()}},
+            "anchored_languages": sorted(anchored),
+            "checked": len(checks),
+            "flagged": sum(1 for c in checks if c["flags"])}
+
+
+def llm_agreement(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Spearman agreement between the measured pillars and the LLM's reading of the same
+    criteria, across every scored field of every version. Two sources for the same
+    property: high agreement says they see the same quality; low agreement on a pillar
+    says at least one of the two readings is measuring something else there.
+    """
+    from scipy.stats import spearmanr
+
+    out: Dict[str, Any] = {}
+    for p in SUBPILLARS:
+        xs, ys = [], []
+        for r in results:
+            variants = ((r.get("metadata") or {}).get("variants")) or {}
+            for v in variants.values():
+                for fr in ((v or {}).get("fields") or {}).values():
+                    m = (fr.get("pillars") or {}).get(p)
+                    l = ((fr.get("llm") or {}).get("criteria") or {}).get(p)
+                    if m is not None and l is not None and fr.get("text"):
+                        xs.append(m); ys.append(l)
+        if len(xs) >= 10 and len(set(xs)) > 1 and len(set(ys)) > 1:
+            out[p] = {"spearman": round(float(spearmanr(xs, ys).statistic), 3), "n": len(xs)}
+        else:
+            out[p] = {"spearman": None, "n": len(xs)}
+    return out
+
+
+__all__ = ["explain", "robustness", "redundancy", "length_bias", "reference_flags",
+           "llm_agreement", "SUBS"]

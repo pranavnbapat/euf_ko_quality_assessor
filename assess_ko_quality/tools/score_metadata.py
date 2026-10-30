@@ -4,18 +4,20 @@
 Score KO metadata - the contributor's and the LLM's proposal - on the same criteria.
 
 For each selected KO this scores the original title / subtitle / description /
-keywords and the *_llm versions already in the export, against the same reading of
-the file, and reports which is better, field by field and pillar by pillar. No LLM is
-called: the models are local (multilingual E5 for embeddings, XLM-R XNLI for
-entailment) and the corpus statistics come from the export.
+keywords and the *_llm versions already in the export, against the same reference
+text (the KO's summary, `reference.source` in the spec), and reports which is better,
+field by field and pillar by pillar. No LLM is called: the models are local
+(multilingual E5 for embeddings, XLM-R XNLI for entailment) and the corpus statistics
+come from the export. The LLM pillar is left out, so each field score here is the mean
+of the three measured pillars; `pipeline.py` adds the LLM's score as the fourth.
 
 --selftest also damages each KO's metadata on purpose, once per sub-pillar, and checks
 that the sub-pillar notices. A metric that does not drop when its property is broken
 is not measuring that property, whatever its name says.
 
     cd assess_ko_quality
-    python -m tools.score_metadata --limit 20 --selftest
-    python -m tools.score_metadata --limit 200 --languages English
+    python -m tools.score_metadata --limit 20 --selftest          # English KOs by default
+    python -m tools.score_metadata --limit 200 --languages all
 
 The first run on an export builds the corpus index (about 20 minutes on CPU, mostly
 embedding every KO once) and caches it under output/_corpus_cache/.
@@ -258,9 +260,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", type=Path, default=None, help="KO export (default: newest in ../input)")
     ap.add_argument("--limit", type=int, default=20)
-    ap.add_argument("--min-chars", type=int, default=500)
+    ap.add_argument("--min-summary-words", type=int, default=50)
     ap.add_argument("--file-type", nargs="*", default=[])
-    ap.add_argument("--languages", nargs="*", default=[])
+    ap.add_argument("--languages", nargs="*", default=["English"],
+                    help="first-listed languages, space-separated; 'all' = every language")
     ap.add_argument("--lang-balance", choices=["equal", "proportional"], default="equal")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--selftest", action="store_true", help="also run the perturbation tests")
@@ -280,7 +283,7 @@ def main() -> None:
                                     log=lambda m: print(m, flush=True))
 
     selected, sel_report = pipeline.select_records(
-        records, limit=args.limit, min_chars=args.min_chars, file_types=args.file_type,
+        records, limit=args.limit, min_summary_words=args.min_summary_words, file_types=args.file_type,
         languages=args.languages, lang_balance=args.lang_balance, seed=args.seed)
     print(f"[select] {sel_report['selected']} of {sel_report['eligible']} eligible "
           f"({', '.join(f'{k} {v}' for k, v in sel_report['by_language'].items())})", flush=True)

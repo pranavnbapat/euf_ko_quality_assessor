@@ -33,7 +33,7 @@ HERE = Path(__file__).resolve().parent
 BASE = HERE.parent
 sys.path.insert(0, str(BASE))
 
-from core.corpus_index import CorpusIndex, Embedder, field_text, ko_id, load_spec  # noqa: E402
+from core.corpus_index import CorpusIndex, Embedder, REFERENCE_SOURCES, field_text, ko_id, load_spec  # noqa: E402
 from core.io_utils import _latest_json_file  # noqa: E402
 from core import metadata_metrics as mm  # noqa: E402
 from tools.score_metadata import _donor  # noqa: E402
@@ -60,14 +60,23 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=7, help="differs from the scoring run's 42 on purpose")
     ap.add_argument("--models", nargs="*", default=CANDIDATES)
     ap.add_argument("--out", type=Path, default=BASE / "validation" / "runs" / "nli_model_comparison.json")
+    ap.add_argument("--reference", choices=REFERENCE_SOURCES, default="file",
+                    help="what the fields are checked against: 'file' (default) reproduces METHODS.md "
+                         "9.2, measured on the June 2026 export; 'summary' re-checks the choice "
+                         "against the reference the score now uses")
     args = ap.parse_args()
 
     export = Path(args.input or _latest_json_file(str(BASE.parent / "input")))
     records = pipeline.read_records(export)
     spec = load_spec()
+    spec["reference"]["source"] = args.reference
     emb = Embedder(spec["models"]["embedding"])
     idx = CorpusIndex.load_or_build(records, export, spec, emb, log=lambda m: print(m, flush=True))
-    selected, rep = pipeline.select_records(records, limit=args.limit, min_chars=500, seed=args.seed)
+    # The sample reported in METHODS.md 9.2 was drawn from KOs with at least 500 characters of
+    # extracted text; filtering the same way first keeps that sample reproducible.
+    records = [r for r in records if len(pipeline.norm_text(r.get("ko_content_flat"))) >= 500]
+    selected, rep = pipeline.select_records(records, limit=args.limit, min_summary_words=0,
+                                            seed=args.seed)
     print(f"[select] {rep['selected']} KOs: {rep['by_language']}", flush=True)
 
     # Contexts and donors are shared by every model, so each model sees identical inputs.

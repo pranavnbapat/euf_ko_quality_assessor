@@ -15,9 +15,11 @@ All of it is computed from the export itself - nothing typed in - and cached, ke
 the export file and the settings that affect it, so a run is reproducible and the
 second run on the same export costs seconds.
 
-The reference text of a KO is what the file says: the vision model's reading of the
-file followed by the extracted text. Metadata fields are deliberately NOT indexed, so a
-title cannot find its own KO by matching itself.
+The reference text of a KO is what its metadata is checked against, set by
+`reference.source` in the spec: the KO's summary (ko_content_flat_summarised, the
+default), or the file itself (the vision model's reading followed by the extracted
+text). Metadata fields are deliberately NOT indexed, so a title cannot find its own KO
+by matching itself.
 """
 from __future__ import annotations
 
@@ -123,8 +125,30 @@ def field_text(field: str, value: Any) -> str:
     return norm_text(value)
 
 
-def reference_text(rec: Dict[str, Any], max_chars: int) -> str:
-    """What the KO says: the vision reading of the file, then the extracted text."""
+SUMMARY_FIELD = "ko_content_flat_summarised"
+REFERENCE_SOURCES = ("summary", "file")
+
+
+def summary_text(rec: Dict[str, Any]) -> str:
+    """The KO's summary as one string; a few records store it as a list of strings."""
+    value = rec.get(SUMMARY_FIELD)
+    if isinstance(value, (list, tuple)):
+        value = " ".join(v for v in value if isinstance(v, str))
+    return norm_text(value)
+
+
+def reference_text(rec: Dict[str, Any], max_chars: int, source: str = "file") -> str:
+    """
+    What a field is checked against (`reference.source` in the spec):
+
+      summary  the KO's summary only; a KO without one has no reference text, so the
+               sub-pillars that read it are not evaluable
+      file     the vision reading of the file, then the extracted text
+    """
+    if source == "summary":
+        return summary_text(rec)[:max_chars]
+    if source != "file":
+        raise ValueError(f"reference.source must be one of {REFERENCE_SOURCES}, not {source!r}")
     vision = norm_text(rec.get("ko_content_flat_vision"))
     content = norm_text(rec.get("ko_content_flat"))
     return f"{vision} {content}".strip()[:max_chars]
@@ -149,6 +173,59 @@ def _value_key(value: Any) -> str:
 
 
 # --------------------------------------------------------------------- language
+# Language names as the vision model writes them (in English) <-> ISO 639-1 codes as
+# langdetect and wordfreq use them. The EU's languages and its neighbours; anything
+# else goes through langcodes when its data package is installed.
+LANGUAGE_CODES: Dict[str, str] = {
+    "bulgarian": "bg", "croatian": "hr", "czech": "cs", "danish": "da", "dutch": "nl",
+    "flemish": "nl", "english": "en", "estonian": "et", "finnish": "fi", "french": "fr",
+    "german": "de", "greek": "el", "hungarian": "hu", "irish": "ga", "italian": "it",
+    "latvian": "lv", "lithuanian": "lt", "maltese": "mt", "polish": "pl",
+    "portuguese": "pt", "romanian": "ro", "moldovan": "ro", "slovak": "sk",
+    "slovenian": "sl", "slovene": "sl", "spanish": "es", "castilian": "es",
+    "swedish": "sv", "norwegian": "no", "icelandic": "is", "turkish": "tr",
+    "ukrainian": "uk", "russian": "ru", "serbian": "sr", "bosnian": "bs",
+    "macedonian": "mk", "albanian": "sq", "catalan": "ca", "basque": "eu",
+    "galician": "gl", "welsh": "cy", "luxembourgish": "lb", "arabic": "ar",
+    "chinese": "zh", "japanese": "ja", "korean": "ko", "hindi": "hi", "persian": "fa",
+    "hebrew": "he",
+}
+_LANGUAGE_NAMES: Dict[str, str] = {}
+for _name, _code in LANGUAGE_CODES.items():
+    _LANGUAGE_NAMES.setdefault(_code, _name.capitalize())
+
+
+def language_code(name: Any) -> Optional[str]:
+    """ISO code of a language named in English ("Lithuanian" -> "lt"); None if unknown."""
+    key = " ".join(str(name or "").lower().replace("(", " ").replace(")", " ").split())
+    if not key:
+        return None
+    if key in LANGUAGE_CODES:
+        return LANGUAGE_CODES[key]
+    for word in key.split():                      # "Brazilian Portuguese", "Dutch Flemish"
+        if word in LANGUAGE_CODES:
+            return LANGUAGE_CODES[word]
+    try:
+        import langcodes
+
+        return langcodes.find(key).language
+    except Exception:
+        return None
+
+
+def language_name(code: Any) -> str:
+    """English name of an ISO code ("lt" -> "Lithuanian"); the code itself if unknown."""
+    code = str(code or "").strip().lower()
+    if code in _LANGUAGE_NAMES:
+        return _LANGUAGE_NAMES[code]
+    try:
+        import langcodes
+
+        return langcodes.Language.get(code).display_name()
+    except Exception:
+        return code
+
+
 def _detect(text: str) -> str:
     from langdetect import DetectorFactory, detect
 
@@ -285,6 +362,16 @@ class CorpusIndex:
     def n_docs(self) -> int:
         return len(self.ids)
 
+    @property
+    def corpus_language(self) -> str:
+        """The language most rows are indexed in ("en": the export's summaries)."""
+        cached = getattr(self, "_corpus_language", "")     # cached pickles predate it
+        if not cached:
+            counts = Counter(l for l in self.langs if l and l != "unknown")
+            cached = counts.most_common(1)[0][0] if counts else "unknown"
+            self._corpus_language = cached
+        return cached
+
     def corpus_specificity(self, token: str) -> float:
         """Normalised IDF over every KO on the platform: 0 in every KO, 1 in none."""
         j = self.vocab.get(token)
@@ -307,26 +394,31 @@ class CorpusIndex:
                     _general_specificity(t, self.wordfreq_langs, self.zipf_max))
                 for t in tokens]
 
-    def key_terms(self, ref_tokens: Sequence[str], k: int) -> List[str]:
+    def key_terms(self, ref_tokens: Sequence[str], k: int,
+                  extra_langs: Sequence[str] = ()) -> List[str]:
         """
         The k most characteristic words of a reference text.
 
         Candidates exclude function words - any word with a Zipf frequency at or above
-        `key_term_max_zipf` in one of the corpus languages (more frequent than one in a
-        thousand words: "the", "een", "und") - as keyphrase extraction always excludes
-        stopwords. The rest are ranked by TF-IDF with sublinear term frequency,
-        (1 + ln tf) x ln(N / df) (Salton & Buckley 1988). Without the exclusion a Dutch
-        file's "key terms" came out as "een, het, kan": IDF alone cannot demote function
-        words of a language that only a few KOs are written in.
+        `key_term_max_zipf` in one of the corpus languages, or in `extra_langs` (the
+        reference's own language, which may be one few corpus KOs share) (more
+        frequent than one in a thousand words: "the", "een", "und") - as keyphrase
+        extraction always excludes stopwords. The rest are ranked by TF-IDF (Salton &
+        Buckley 1988) with sublinear term frequency, (1 + ln tf) x ln(N / df) (Manning,
+        Raghavan & Schutze 2008). Without the exclusion a Dutch file's "key terms" came
+        out as "een, het, kan": IDF alone cannot demote function words of a language
+        that only a few KOs are written in.
         """
         from wordfreq import zipf_frequency
 
+        langs = tuple(self.wordfreq_langs) + tuple(
+            l for l in _wordfreq_languages(extra_langs) if l not in self.wordfreq_langs)
         # Words only: identifiers and codes ("bp_pwgz9g80", "2019") are rare, so TF-IDF
         # would otherwise rank them as the file's most characteristic terms.
         counts = Counter(t for t in ref_tokens if len(t) >= 3 and t.replace("-", "").isalpha())
         scored = []
         for t, tf in counts.items():
-            if max((zipf_frequency(t, l) for l in self.wordfreq_langs), default=0.0) >= self.key_term_max_zipf:
+            if max((zipf_frequency(t, l) for l in langs), default=0.0) >= self.key_term_max_zipf:
                 continue
             j = self.vocab.get(t)
             d = int(self.df_all[j]) if j is not None else 0
@@ -359,11 +451,51 @@ class CorpusIndex:
         if not cols:
             return float(self.n_docs)            # nothing in the query exists anywhere
         scores = np.asarray(self.bm25[:, cols].sum(axis=1)).ravel()
+        ov = getattr(self, "_ref_overrides", {}).get(own)
+        if ov:
+            scores[own] = sum(ov["bm25"].get(j, 0.0) for j in cols)
         return self._rank(scores, own)
 
     def rank_semantic(self, query_vec: np.ndarray, own: int) -> float:
-        scores = self.passages @ query_vec.ravel()
+        q = query_vec.ravel()
+        scores = self.passages @ q
+        ov = getattr(self, "_ref_overrides", {}).get(own)
+        if ov:
+            scores[own] = float(ov["vec"] @ q)
         return self._rank(scores, own)
+
+    # ----------------------------------------------------------------- overrides
+    def override_reference(self, own: int, text: str, embedder: Embedder,
+                           spec: Dict[str, Any]) -> None:
+        """
+        Replace one KO's own row in the rankings with a new reference text
+        (--resummarise), without rebuilding the index.
+
+        The KO's own BM25 weights and passage embedding are recomputed from `text`
+        with the corpus's existing statistics (IDF, average document length), so its
+        fields are ranked against the new text. This is an approximation: document
+        frequencies, density anchors and the other KOs' rows stay those of the export's
+        summaries, and a term absent from the corpus vocabulary cannot score. Fine while
+        few KOs are re-summarised; if most are, rebuild the index from a re-summarised
+        export instead.
+        """
+        k1, b = float(spec["bm25"]["k1"]), float(spec["bm25"]["b"])
+        counts = Counter(word_tokens(text))
+        dl = float(sum(counts.values()))
+        avgdl = float(self.meta.get("avg_doc_tokens") or 1.0)
+        n = self.n_docs
+        weights: Dict[int, float] = {}
+        for t, tf in counts.items():
+            j = self.vocab.get(t)
+            if j is None:
+                continue
+            df = int(self.df_all[j])
+            idf = math.log((n - df + 0.5) / (df + 0.5) + 1.0)
+            weights[j] = idf * tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * dl / avgdl))
+        vec = embedder.passages([text[:int(spec["reference"]["passage_chars"])]])[0]
+        if not hasattr(self, "_ref_overrides"):     # cached pickles predate the attribute
+            self._ref_overrides = {}
+        self._ref_overrides[own] = {"bm25": weights, "vec": vec}
 
     # ----------------------------------------------------------------- build
     @classmethod
@@ -376,7 +508,7 @@ class CorpusIndex:
         idx = cls()
         idx.ids = [ko_id(r) for r in records]
         idx.pos = {k: i for i, k in enumerate(idx.ids) if k}
-        refs = [reference_text(r, ref_cfg["max_chars"]) for r in records]
+        refs = [reference_text(r, ref_cfg["max_chars"], ref_cfg.get("source", "file")) for r in records]
         n = len(refs)
 
         log(f"[corpus] detecting the language of {n} KOs ...")
@@ -468,6 +600,7 @@ class CorpusIndex:
 
         idx.meta = {
             "records": n,
+            "reference_source": ref_cfg.get("source", "file"),
             "languages": dict(lang_counts.most_common()),
             "wordfreq_languages": list(idx.wordfreq_langs),
             "vocabulary": len(idx.vocab),
@@ -486,10 +619,14 @@ class CorpusIndex:
 
     @classmethod
     def passages_key(cls, export: Path, spec: Dict[str, Any]) -> str:
-        """Embeddings depend only on the export, the model and the passage length."""
+        """Embeddings depend only on the export, the model, the reference text and the passage length."""
+        ref = spec["reference"]
         parts = cls._export_stamp(export) + [spec["models"]["embedding"],
-                                             str(spec["reference"]["max_chars"]),
-                                             str(spec["reference"]["passage_chars"])]
+                                             str(ref["max_chars"]), str(ref["passage_chars"])]
+        # The file was the only reference before `source` existed, so it adds nothing to
+        # the key and embeddings already cached for it stay valid.
+        if ref.get("source", "file") != "file":
+            parts.append(ref["source"])
         return hashlib.sha1("|".join(parts).encode()).hexdigest()[:16]
 
     @classmethod
@@ -541,6 +678,7 @@ class CorpusIndex:
 
 __all__ = [
     "CorpusIndex", "Embedder", "load_spec", "ko_id", "project_key", "field_value",
-    "split_keywords", "field_text", "reference_text", "word_tokens", "has_letter",
+    "split_keywords", "field_text", "reference_text", "summary_text", "REFERENCE_SOURCES",
+    "word_tokens", "has_letter",
     "detect_languages", "ko_language_text", "keyword_set_similarity", "FIELDS", "TEXT_FIELDS",
 ]

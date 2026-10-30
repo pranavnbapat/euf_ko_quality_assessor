@@ -24,7 +24,7 @@ treated differently:
 | | who controls it | role in the assessment |
 |---|---|---|
 | **The file's content** (text, vision reading) | the original author | measured and reported; **never affects the score** |
-| **The metadata** (title, subtitle, description, keywords) | the contributor, or our LLM | **the score** |
+| **The metadata** (title, subtitle, description, keywords) | the contributor's version and an LLM version written fresh from the summary each run (the export's `*_llm` with `--use-existing-llm`) | **the score**: three measured pillars and an LLM's 0-100 score (Section 9), a quarter each |
 | **Domain relevance** | - | a **gate**: off-domain KOs are not scored at all |
 | **Required fields** | the contributor | a **compliance checklist**, reported, not scored |
 
@@ -33,6 +33,18 @@ search engine what this file is?* The answer is built from measurable, reproduci
 criteria only. Human reviewer ratings are **not** used to fit or validate it; reviewer
 judgement is itself subjective and error-prone, so validation is technical instead
 (Section 7).
+
+**What the metadata is checked against.** Since version 9, the metadata is checked
+against the KO's summary (`ko_content_flat_summarised`), not the file's full text.
+This is a choice, not a published rule. Since version 11 every language is assessed
+by default, with results reported per file language; since version 12 the LLM
+version is written fresh from that summary each run - blind, and in the document's
+own language (Section 9) - so both versions are measured against the text the LLM
+version was written from (`--use-existing-llm` restores the export's `*_llm`
+fields, which came from the same summary plus the contributor's value). The sources below measure metadata against the
+document itself (Ochoa & Duval's accuracy). SummaC and FactCC check a summary against
+its source document. Using the file's summary as the reference departs from them, and
+it favours text written from the summary (METHODS.md §12).
 
 ---
 
@@ -97,7 +109,7 @@ their definitions rather than inventing new ones:
 | Ochoa & Duval metric | their definition | sub-pillar here |
 |---|---|---|
 | Accuracy | "the semantic distance between the information that a user could extract from the metadata record and the information that the same user could obtain from the document itself"; for text documents, the distance between the title or description and the document's text | consistency (accuracy part) |
-| Coherence | "a coherent metadata record describes the same topic in title, description and keywords", measured as the semantic distance between those free-text fields | consistency (coherence part) |
+| Coherence | a coherent record describes the same topic in title, description and keywords; measured as the semantic distance between those free-text fields (they used LSA) | consistency (coherence part) |
 | Text information content | TF-IDF over the field's words: term frequency x log(1 / document frequency); in the 2009 evaluation the authors single it out as agreeing especially well with human review | density |
 | Readability (cognitive accessibility) | a readability index applied to the description | clarity |
 
@@ -149,7 +161,7 @@ a number, no number is imposed and the length sub-pillar is not evaluated.
 
 | field | rule | source |
 |---|---|---|
-| title | at most 150 characters, not counting spaces | EIP-AGRI Common Format (European Commission, 2015): project title "short and easily understandable (one key sentence; max 150 characters, word count - no spaces)" |
+| title | at most 150 characters, not counting spaces | EIP-AGRI Common Format (European Commission, 2015): project title "short and easily understandable (one key sentence on the project; max 150 characters, word count – no spaces)" |
 | description | 50 to 5,000 characters | Google Search Central, Dataset structured data: "The summary must be between 50 and 5000 characters long" |
 | subtitle | none | no published source gives a length |
 | keywords | none | no published source gives a count; their form (one concept per term, no duplicates; ANSI/NISO Z39.19) and diversity (KPEval) are still checked |
@@ -191,8 +203,9 @@ a number, no number is imposed and the length sub-pillar is not evaluated.
 - **Why the last check:** a title reused across unrelated projects is boilerplate, not
   a description of this file. Detected from the corpus, so no list of "placeholder
   words" is typed in.
-- **Optional fields:** subtitle is optional; when absent it is left out of the score
-  entirely rather than scored as missing.
+- **Missing fields:** every field is expected, subtitle included. An empty field scores
+  0 and counts in the KO score, as in Ochoa & Duval's (2006) completeness metric, which
+  counts the fields that hold a value, so a missing field adds nothing to the score.
 
 ### 3.3 Noise
 - **Source:** the rule-based text-quality filters used to clean web corpora for
@@ -238,8 +251,9 @@ into **accuracy** and **coherence**.
 - **Sources:**
   - Ochoa & Duval (2006, 2009): accuracy is the semantic distance between what the
     metadata says and what the document says.
-  - Natural language inference as a test of factual consistency: Falke et al. (2019),
-    Kryscinski et al. (2020, FactCC), and SummaC (Laban et al. 2022). A description is,
+  - Natural language inference as a test of factual consistency: Falke et al. (2019)
+    and SummaC (Laban et al. 2022); FactCC (Kryscinski et al. 2020), a consistency
+    classifier trained on synthetic errors, frames the same problem. A description is,
     in effect, a summary of the file, so this is the summarisation-faithfulness problem.
   - Cross-lingual NLI: XNLI (Conneau et al. 2018) on XLM-RoBERTa (Conneau et al. 2020).
     Which model is used is decided by measurement (Section 7.3).
@@ -248,20 +262,36 @@ into **accuracy** and **coherence**.
   - For keywords, the distinction between "present" keyphrases, which occur in the
     text, and "absent" ones, which are correct without occurring (Meng et al. 2017).
 - **How (text fields):** each claim - the title, the subtitle, each description
-  sentence - is compared with the two passages of the file most similar to it (found
-  with multilingual E5). A claim scores max(P(entailment) - P(contradiction)) over
-  those passages, which is SummaC's zero-shot rule; the field scores the mean, mapped
-  from [-1, 1] to [0, 1].
+  sentence - is compared with the two passages of the reference text most similar to
+  it (found with multilingual E5). Since version 9 the reference text is the KO's
+  summary (Section 1); "the file" below means that reference. A claim scores max(P(entailment) - P(contradiction)) over
+  those passages and the field scores the mean, mapped from [-1, 1] to [0, 1]. This is
+  adapted from SummaC's zero-shot rule, which takes the maximum over premises and the
+  mean over claims; its paper scores the entailment probability, and its released code
+  subtracts the highest contradiction probability from the highest entailment
+  probability. Here the difference is taken per passage, then maximised.
 - **How (keywords):** the share of terms that occur in the file ("present"), or whose
   similarity to the file's closest passage beats the 95th percentile of randomly drawn
   corpus keywords ("absent" but supported). The threshold is learned per file from that
   null distribution, not typed in.
+- **Cross-lingual keywords (versions 13-14):** that chance threshold is calibrated on
+  same-language pairs, so keywords that do not read as the reference's language
+  (wordfreq known-word share: fewer than half of at least two alphabetic tokens known
+  at Zipf >= 2.0; open-set langdetect misreads short fields and is not used) are marked
+  **not evaluable** rather than scored, and their weight redistributes. With
+  `--resummarise` (version 15) the reference itself is in the document's language, so
+  same-language keywords are measured directly; keywords written in English on a
+  non-English document are measured against the English version of that summary
+  instead of abstaining, with the evidence naming the basis. The NLI accuracy of
+  title, subtitle and description stays in every case - XNLI is cross-lingual by
+  construction.
 - **Why NLI rather than similarity:** similarity says two texts are about the same
   thing; NLI says one supports the other and can detect contradiction. A description
   that names the wrong country or crop can be very similar to the file and still wrong.
 - **Limits:** NLI models are weaker on long premises, hence the retrieval of the two
-  best passages first; the first 40 passages (about 4,800 words) of a long document are
-  searched, not the whole document. XNLI covers 15 languages, of which only English,
+  best passages first. With the summary as the reference the whole summary is searched
+  (about 200 words, rarely over 600); with the file, the first 40 passages (about 4,800
+  words) of a long document are searched, not the whole document. XNLI covers 15 languages, of which only English,
   French, Spanish, German, Greek and Bulgarian are EU languages; for the rest the model
   depends on cross-lingual transfer or on machine-translated training data. Descriptions
   written as statements about the document ("This report explores ...") tend to come
@@ -312,12 +342,12 @@ into **accuracy** and **coherence**.
 - **Sources:**
   - Readability of the description as a metadata-quality metric: Ochoa & Duval (2006),
     who used the Flesch index. LIX (Björnsson 1968) is used here instead because it
-    needs no syllable counting and was validated across 11 languages (Björnsson 1983);
+    needs no syllable counting and was applied to newspapers in 11 languages (Björnsson 1983);
     Flesch-type formulas are calibrated for English. Björnsson's scale runs from about
     20 (very easy) to 60 (very difficult); Anderson (1983) relates it to reading grades.
   - Acronyms: Barnett & Doubleday (2020) show acronyms in over 24 million titles and 18
-    million abstracts have grown steadily while few are ever reused - most appear fewer
-    than ten times - so an unexplained acronym is a genuine barrier to a reader. The
+    million abstracts have grown steadily while few are ever reused - 79% appear ten
+    times or fewer - so an unexplained acronym is a genuine barrier to a reader. The
     matcher is a simplified Schwartz & Hearst (2003), the standard algorithm for finding
     where an abbreviation is spelled out.
   - ISO 25012 understandability.
@@ -347,8 +377,9 @@ into **accuracy** and **coherence**.
 - **How:** *coverage* is the share of the file's ten most characteristic words that
   the field carries, literally or by meaning; "by meaning" must beat the 95th percentile
   similarity of random corpus keywords to the same field. The characteristic words are
-  ranked by TF-IDF with sublinear term frequency, (1 + ln tf) x ln(N/df) (Salton &
-  Buckley 1988), after excluding function words: any word with a Zipf frequency of 6 or
+  ranked by TF-IDF (Salton & Buckley 1988) with sublinear term frequency, (1 + ln tf) x
+  ln(N/df) (Manning, Raghavan & Schütze 2008, "Sublinear tf scaling"), after excluding
+  function words: any word with a Zipf frequency of 6 or
   more in one of the corpus languages (more frequent than 1 in 1,000 words), as
   keyphrase extraction always excludes stopwords. For subtitle and description, *adds to
   the title* is 1 minus their word overlap with the title. For keywords, *diversity*
@@ -368,7 +399,10 @@ into **accuracy** and **coherence**.
   coverage is near zero for right and wrong keywords alike, the diversity part decides
   usefulness, so the self-test found cases where another project's keywords scored as
   useful. Wrong keywords are still caught by consistency, which dropped in every
-  swapped-field test.
+  swapped-field test. Since version 13 coverage is marked **not evaluable** for a
+  field that does not read as the reference's language, instead of letting a
+  near-zero reading stand: key-term extraction needs document-frequency and
+  word-frequency statistics in the field's language.
 - **Coherence vs redundancy:** these are not in tension. Coherence (4.1) asks that the
   fields be about the same thing; redundancy asks that they not use the same words to
   say it. A description that restates the title is coherent and redundant.
@@ -386,14 +420,18 @@ into **accuracy** and **coherence**.
 - **How:** the field is used as a query against an index of every KO's file text (not
   their metadata, so a title cannot match itself). The rank of the KO the field belongs
   to is recorded, and converted to a gain of 1 / log2(1 + rank), the discount of
-  discounted cumulative gain (Järvelin & Kekäläinen 2002): rank 1 scores 1.0, rank 3
-  scores 0.5, rank 10 scores 0.29. Ties share the middle of their block.
+  normalised discounted cumulative gain in its standard form (Burges et al., ICML 2005;
+  used by BEIR): rank 1 scores 1.0, rank 3 scores 0.5, rank 10 scores 0.29. Ties share
+  the middle of their block. Järvelin & Kekäläinen's (2002) original DCG discount
+  differs: no discount before rank 2, then 1 / log2(rank).
 - **Why this is a metadata-quality measure:** a title like "Final report" is not wrong,
   but it does not identify its file among 10,000; this measures exactly that. Ochoa &
   Duval (2006) treat findability as the "physical/logical accessibility" of metadata
   and note that retrieval frequency only measures accessibility "with the current
-  searching tool"; they ask for a measure of *potential* accessibility. Retrievability
-  under a fixed, standard retrieval model is such a measure.
+  searching tool"; they ask for a measure of *potential* accessibility, and propose
+  linkage (how many other records reference it). Retrievability under a fixed, standard
+  retrieval model is another measure of potential accessibility, closer to how a
+  search-driven platform is used.
 
 - **Top-venue support:** KPEval's *utility* aspect (Findings of ACL 2024) evaluates
   keyphrases by retrieval effectiveness, with BM25 and a dense retriever averaged -
@@ -402,15 +440,24 @@ into **accuracy** and **coherence**.
   here, as the standard retrieval measure.
 
 ### 5.2 BM25 findability
-- **Source:** Okapi BM25 (Robertson & Zaragoza 2009), with the standard k1 = 1.2,
-  b = 0.75. It is the lexical scorer inside OpenSearch.
+- **Source:** Okapi BM25 (Robertson & Zaragoza 2009), with k1 = 1.2 and b = 0.75, the
+  defaults of OpenSearch, the platform's search engine (OpenSearch documentation). They
+  sit at the edge of the ranges Robertson & Zaragoza report as reasonably good in many
+  circumstances (1.2 < k1 < 2, 0.5 < b < 0.8).
 - **Why:** it measures findability for someone typing the words, in the file's language.
+- **Cross-lingual limit (version 13):** BM25 is lexical and the index holds the English
+  reference summaries, so a field that does not read as the index's language is marked
+  **not evaluable** rather than given a meaningless rank - in a subset where only one
+  KO carries a language, any query in that language would rank it first without
+  competition. The functional pillar is then carried by semantic findability alone,
+  which is multilingual.
 
 ### 5.3 Semantic findability
 - **Source:** dense retrieval (Karpukhin et al., EMNLP 2020) with multilingual E5 (Wang
-  et al. 2024); the E5 family is the best publicly available model on the Massive
-  Multilingual Text Embedding Benchmark (MMTEB, Enevoldsen et al., ICLR 2025). The small
-  variant is used for CPU cost; `multilingual-e5-large` is a configuration change.
+  et al. 2024). On the Massive Multilingual Text Embedding Benchmark (MMTEB, Enevoldsen
+  et al., ICLR 2025) the best publicly available model is `multilingual-e5-large-instruct`,
+  from the same family. The small variant is used here for CPU cost; a larger one is a
+  configuration change.
 - **Why:** it measures findability by meaning, and across languages: an English title
   for a Spanish file can still find its file. The two together separate "wrong words"
   from "wrong language".
@@ -448,8 +495,11 @@ into **accuracy** and **coherence**.
   0-1 with a declared direction: higher-is-better, lower-is-better, or a target range.
 - **Weights:** equal, at every level (sub-pillars within a pillar, pillars within a
   field, fields within a KO). Without an external criterion no weighting can be shown
-  to be correct; equal weights is the handbook's default and is hard to beat in
-  practice (Dawes 1979). Weights are configurable in `validation/metadata_spec.json`.
+  to be correct. Equal weights are what most composite indicators use (the handbook:
+  "Most composite indicators rely on equal weighting") and are hard to beat in practice
+  (Dawes 1979). The handbook also warns that equal weights can disguise the lack of an
+  empirical basis, which is why stage 6 tests alternatives. Weights are configurable in
+  `validation/metadata_spec.json`.
 - **Robustness (built, stage 6):** the handbook's robustness step - recompute with
   data-driven weights (entropy; CRITIC, Diakoulaki, Mavrotas & Papayannakis 1995; first
   principal component) and report how far KO rankings move (Saisana, Saltelli & Tarantola
@@ -514,7 +564,7 @@ rule stated by a published guideline; "learned" computed from the corpus by a st
 | formatting | not all capitals | - | published finding | Tinker (1963) |
 | formatting | longest keyword | corpus 99th percentile (5 words) | learned | Z39.19 asks for concise terms but sets no limit |
 | consistency | accuracy definition | metadata vs document | published method | Ochoa & Duval (2006, 2009) |
-| consistency | accuracy scoring | max(P(entail) - P(contradict)) over the best passages, mean over claims | published method | SummaC zero-shot (Laban et al. 2022) |
+| consistency | accuracy scoring | max(P(entail) - P(contradict)) over the best passages, mean over claims | published method, adapted | SummaC zero-shot (Laban et al. 2022): maximum over premises, mean over claims; entailment minus contradiction per passage is the adaptation |
 | consistency | title hypothesis | "This text is about {title}." | published method | Yin, Hay & Roth (2019) |
 | consistency | passages per claim / description sentences / passages searched | 2 / 8 / 40 x 120 words | choice | compute bounds; SummaC also scores against the best-matching premise |
 | consistency | keyword support threshold | 95th percentile of random keywords | choice | the usual one-sided 5% level; learned per file |
@@ -522,22 +572,32 @@ rule stated by a published guideline; "learned" computed from the corpus by a st
 | consistency | coherence baseline | 300 random KOs | choice | sample size; ranks against chance instead of a raw cosine |
 | density | word specificity | min(platform IDF, 1 - Zipf/8) | published method | Ochoa & Duval text information content (TF-IDF); Spärck Jones (1972); wordfreq (Speer 2022), Zipf scale (van Heuven et al. 2014) |
 | density | scale anchors | corpus 5th-95th percentile | choice | min-max normalisation with outlier trimming, one of the options in the OECD/JRC handbook |
-| clarity | readability index | LIX | published method | Björnsson (1968), validated in 11 languages (Björnsson 1983); applied to descriptions as in Ochoa & Duval (2006) |
+| clarity | readability index | LIX | published method | Björnsson (1968), applied in 11 languages (Björnsson 1983); applied to descriptions as in Ochoa & Duval (2006) |
 | clarity | readability cut-offs | full at 40 or below, zero at 60 or above | published scale | Björnsson's scale: about 20 very easy to 60 very difficult |
 | clarity | minimum words for readability | 40 | choice | readability formulas assume samples of about 100 words; below 40 words one or two sentences dominate the index |
 | clarity | acronyms | share of tokens that are unexplained acronyms | published finding + method | Barnett & Doubleday (2020); Schwartz & Hearst (2003) |
-| usefulness | coverage | recall of the file's salient words | published method | ROUGE-style recall (Lin 2004); TF-IDF (Salton & Buckley 1988) |
+| usefulness | coverage | recall of the file's salient words | published method | ROUGE-style recall (Lin 2004); TF-IDF (Salton & Buckley 1988); sublinear tf (Manning, Raghavan & Schütze 2008) |
 | usefulness | number of salient words | 10 | convention | the usual keyphrase evaluation cut-offs are 5 and 10 (e.g. Meng et al. 2017) |
 | usefulness | function-word exclusion for key terms | Zipf >= 6 in any corpus language | choice | Zipf scale (van Heuven et al. 2014): 6 = once per 1,000 words, the function-word band; stopword exclusion is standard in keyphrase extraction |
 | usefulness | keyword diversity | mean(1 - dup_token_ratio, anchored emb_sim) | published method | KPEval (Findings of ACL 2024); Bahuleyan & El Asri (COLING 2020) |
 | usefulness | diversity anchors | corpus 5th-95th percentile over 1,000 keyword sets | choice | emb_sim has no natural scale with E5 |
 | usefulness | redundancy | 1 - Jaccard with the title | published method | Stvilia et al. (2007) informativeness/redundancy; Jaccard (1912) |
 | findability | measure | rank of the KO when searching with the field | published method | retrievability (Azzopardi & Vinay 2008); known-item queries (Azzopardi, de Rijke & Balog 2007) |
-| findability | rank to score | 1 / log2(1 + rank) | published method | DCG discount (Järvelin & Kekäläinen 2002) |
-| findability | BM25 parameters | k1 = 1.2, b = 0.75 | published default | Robertson & Zaragoza (2009) |
-| findability | passage per KO | first 2,000 characters | choice | the embedding model reads at most 512 tokens |
-| aggregation | weights | equal at every level | published default | OECD/JRC (2008); Dawes (1979) |
-| aggregation | optional subtitle | left out when absent | learned | only 31% of records have a subtitle, so its absence is not treated as a fault |
+| findability | rank to score | 1 / log2(1 + rank) | published method | nDCG discount in its standard form (Burges et al., ICML 2005), after Järvelin & Kekäläinen (2002) |
+| findability | BM25 parameters | k1 = 1.2, b = 0.75 | software default | OpenSearch defaults; at the edge of the ranges Robertson & Zaragoza (2009) report as reasonably good |
+| findability | passage per KO | first 2,000 characters of the reference text | choice | the embedding model reads at most 512 tokens |
+| all semantic and functional parts | reference text | the KO's summary (`ko_content_flat_summarised`); every language since version 11. With `--resummarise` (version 15), a fresh summary of the downloaded file **in the document's own language**, which replaces it as the reference; its English version is the KO's row in the corpus index and the secondary reference for English-language fields on a non-English document | choice | the LLM version is written from the same summary, so both versions are measured against the text it was written from; it favours text written from the summary (METHODS.md §12). Up to version 8: the vision reading followed by the extracted text |
+| cross-lingual evaluability | known-word share | a field reads as a language when at least half of its (at least 2) alphabetic tokens are known words of it, wordfreq Zipf >= 2.0; below that, the lexical parts - bm25_findability, usefulness.coverage, keywords' accuracy - are not evaluable and their weight redistributes; with `--resummarise` (version 15) the reference is in the document's language, so bm25_findability gates on the corpus index's language (English) instead of the reference's | choice | wordfreq (Speer 2022); open-set langdetect rejected by measurement (it misreads short fields); exclusion rather than a zero keeps an unmeasurable property out of the score |
+| generation (version 12) | brief | blind - the summary and the published rules only, never the contributor's fields; written in the document's language; at most 10 keywords | choice + convention | blind generation keeps the text under assessment out of the writer's context; 10 follows the usual keyphrase cut-offs (Meng et al. 2017); the count is never scored |
+| resummarise (version 15) | file handling | the file downloaded from its URL and read as it is: PDF and image pages as images (one per image, no page cap), office files converted to PDF first, a video's sound transcribed by Whisper and its frames shown, an audio file as its transcript | choice + published model | the export's stored text can be a translation of the file, so the file itself is read; 12 images per prompt is the provider's measured limit; Whisper (Radford et al., ICML 2023) transcribes zero-shot across languages |
+| resummarise (version 15) | long documents | notes per chunk of 12 pages, merged 8 at a time until one summary remains | published method | hierarchical merging, the more coherent of the two workflows BooookScore compares (Chang et al., ICLR 2024) |
+| resummarise (version 15) | verification | every draft read against each chunk of its source for contradicted statements and missing content; one revision call applies the findings; none when there are none | published method, adapted | Chain-of-Verification (Dhuliawala et al., Findings of ACL 2024): draft, verify independently, revise |
+| resummarise (version 15) | summary language | the document's own, named by the model from the pages; an English translation for the corpus row | design decision (30 October 2026) | a non-English KO's fields are then measured in their own language; the corpus index stays English, so BM25 findability gates on the index's language |
+| LLM pillar | model | glm-5.2, which wrote neither version (the generator is qwen3.5 by default; the export's `*_llm` fields came from another Qwen model) | choice | self-preference (Panickssery et al., NeurIPS 2024) cannot favour a version it did not write, so the judge stays out of the writer's model family (the pipeline warns on a match); of the judges measured, glm-5.2 was the more order-consistent (60-63% vs 55%) |
+| LLM pillar | score | one 0-100 score per field per version, one call each, from the summary and that field; a quarter of the field score | published approach + choice | rating named criteria with an LLM is the approach of G-Eval (Liu et al., EMNLP 2023); scoring each version alone removes the position bias of pairwise comparison (Wang et al., ACL 2024); the one-call-per-field form and the equal weight are choices |
+| LLM pillar | language line (version 12) | the prompt names the KO's language, says the summary is English, and asks for meaning to be judged across languages without penalising the language itself | published finding | LLM evaluators are less reliable on non-English text (Hada et al., Findings of EACL 2024) |
+| aggregation | weights | equal at every level | common practice | OECD/JRC (2008): most composite indicators use equal weights; Dawes (1979) |
+| aggregation | empty field, subtitle included | scores 0 | published method | Ochoa & Duval (2006) completeness: counts the fields that hold a value |
 
 **What the review changed** (all reflected in the code and `validation/metadata_spec.json`):
 
@@ -574,7 +634,7 @@ text would be removed by filter X":
 | Gopher repetition | duplicate lines <= 30% (chars <= 20%), paragraphs likewise; top 2/3/4-gram char share <= 0.20/0.18/0.16; duplicated 5-10-gram share <= 0.15-0.10 | Rae et al. (2021) |
 | FineWeb filters | lines ending in punctuation > 12%; chars in duplicated lines < 10%; lines under 30 chars < 67% | Penedo et al., NeurIPS 2024 (selected by ablation from over 50 candidates) |
 | C4 rules kept by FineWeb | no "lorem ipsum", curly brackets or javascript lines (FineWeb drops C4's terminal-punctuation rule: it removed 30% of tokens) | Raffel et al. (2020); Dodge et al., EMNLP 2021 |
-| Stop words per language | the language's 8 commonest words, not Gopher's English list | FineWeb2, Penedo et al., COLM 2025 |
+| Stop words per language | the language's 8 commonest words (wordfreq), not Gopher's English list | adapted from FineWeb2 (Penedo et al., COLM 2025), which takes each language's stop words above a frequency threshold, at least eight |
 | Declared vs detected language | first declared language vs detected | Kreutzer et al., TACL 2022: mislabelled language is common and easy to detect |
 | Lexical richness | MTLD, 50+ words | McCarthy & Jarvis (2010) |
 | Readability | LIX, 100+ words | Björnsson (1968, 1983) |
@@ -585,31 +645,64 @@ et al. 2020) needs a KenLM model per language, several GB each; lexical density 
 1971) and entity-grid coherence (Barzilay & Lapata 2008) need a tagger or parser per
 language.
 
-## 9. The LLM review step (**built**, `stages/metadata_llm.py`, `--llm-review`)
+## 9. The LLM pillar (**built**, `stages/llm_score.py`)
 
-For each KO, one LLM call returns, per field, a verdict (correct or not, and which
-criterion fails) and a new version only when the original is not correct. The
-proposal is then scored with the same scorer and kept only if its field score is at
-least 1 point higher **and** its accuracy against the file (the NLI part of consistency)
-has not dropped by more than 0.02.
+An LLM scores each field of each version, 0-100, from the KO's summary, that one field
+and the criteria of the three measured pillars; one call per field, because multi-field
+answers were where the output broke. The score is the fourth pillar of the field score,
+with the weight of each measured pillar. Rating named criteria with an LLM is the
+approach of G-Eval (Liu et al., EMNLP 2023). Each version is scored on its own, not side
+by side, which removes the position bias Wang et al. (ACL 2024) found in pairwise
+comparison. The model, glm-5.2, wrote neither version - the `*_llm` fields came from a
+Qwen model - so self-preference (Panickssery et al., NeurIPS 2024) cannot favour one. The recommendation between the two
+versions keeps a faithfulness condition on the measured accuracy, because optimising
+against a proxy degrades the true objective (Gao, Schulman & Hilton, ICML 2023).
 
-**Why the scorer decides and not the LLM:** LLM judges have measurable biases (Zheng et
-al. 2023), and the existing `*_llm` fields show the practical symptom: in a sample of
-96 KOs the LLM changed 76 titles and 90 descriptions although its prompt allowed it to
-return a field unchanged, and nothing records whether it judged the original wrong. A
-measurable acceptance rule stops rewrites made for style alone.
+**Known and accepted for now.** The G-Eval authors report that LLM evaluators may favour
+LLM-generated text, which here is the `*_llm` version. Side-by-side comparisons made
+earlier in this project (version 7: scored against the file, 10 English KOs, 40 fields,
+`output/llm_compare_en10/`) found the same:
 
-**Risk to watch - Goodhart's law** (Manheim & Garrabrant 2018): the metadata prompt
-tells the LLM to be "keyword-rich for search", which is close to what the functional
-pillar rewards. A proposal can learn to score well without describing the file better.
-The accuracy constraint is the counterweight: optimising against a proxy degrades the
-true objective (Gao, Schulman & Hilton, ICML 2023), so faithfulness to the file is a
-hard constraint rather than one term among others. The model's position, verbosity and
-self-preference biases (Zheng et al., NeurIPS 2023; Wang et al., ACL 2024) are why its
-verdict is checked by measurement rather than trusted; G-Eval-style LLM scoring (Liu et
-al., EMNLP 2023) was not used for the same reason.
+| | glm-5.2 as judge | gpt-oss-120b as judge |
+|---|---|---|
+| same verdict when the order is reversed | 60% | 55% |
+| picked whichever version was shown first (chance 33%) | 50% | 56% |
+| verdict agrees with the measured best | 54% | 46% |
+| share of wins given to its own model's text | **71%** | **77%** |
+| times it picked the contributor's original | 0 | 0 |
+
+Both judges showed the position bias and the self-preference reported in the literature,
+never preferred the contributor's version even where it measured best, and their 1-5
+ratings barely followed the measured properties (Spearman 0.06-0.34); qwen3.5-397b as a
+judge repeated its verdict with the order reversed on only 45% of fields
+(`output/llm_compare_glm_qwen_en10/`). This is why the LLM is one pillar of four rather
+than the whole score.
+
+Versions 7 to 9 also had a stage 5 that wrote new LLM versions (glm-5.2, compared with
+gpt-oss-120b and qwen3.5-397b in the runs above) and judged them side by side. Version 10
+removed it and compared the contributor's version with the `*_llm` fields already in the
+export; its code is kept in `legacy/metadata_llm.py`. Version 12 brought back only the
+blind generation: the LLM version is written fresh from the summary each run - one call
+per KO, the summary and the published rules only, never the contributor's fields, in the
+document's own language - and scored by the ordinary per-field machinery, never judged
+side by side. The writer (qwen3.5 by default) is kept out of the judge's model family
+for the self-preference reason above; the pipeline warns on a family match. Since
+version 12 the judge's prompt also names the KO's language and asks for meaning to be
+rated across languages without penalising the language itself, because LLM evaluators
+are less reliable on non-English text (Hada et al., Findings of EACL 2024).
 
 ## 10. Results so far
+
+**These results predate the current rules.** They come from version 7:
+- measured against the file;
+- the existing `*_llm` fields compared;
+- an empty subtitle left out.
+
+Under version 8's rule that an empty field scores 0, the same run's overall means become
+about 63.3 (contributor) and 77.5 (existing `*_llm`). No full run under the current
+rules (version 14: the summary as the reference, every language, the LLM version
+generated fresh in the document's language, the LLM pillar, cross-lingual gating) has
+been written up here yet.
 
 Run of 20 KOs, one per language (Bulgarian, Croatian, Czech, Danish, Dutch, Finnish, French, German, Greek, Hungarian, Irish, Italian, Latvian, Lithuanian, Polish, Portuguese, Romanian, Slovene, Spanish, Swedish); seed 42;
 `python pipeline.py --limit 20 --selftest`. Output folder: `output/run_final_20ko_v4/`.
@@ -664,11 +757,10 @@ CRITIC 0.964, PCA 0.983; sub-pillars: entropy
 barely change under other defensible weights. No sub-pillar pair is redundant
 (|rho| >= 0.9); the strongest length association is clarity (rho -0.451).
 
-**LLM review** (tested earlier on 10 KOs, under the previous length rules; 9 calls):
-14 of 40 fields replaced; 5 proposals rejected as
-less faithful to the file and 2 as not measurably better; 11
-fields judged correct and kept. Rerun with `--llm-review --llm-limit 10` (10 calls) to
-repeat it under the current rules.
+**Recommended versions** (10 English KOs, `output/llm_blind_en10/`, 40 fields): choosing
+between the contributor's and the existing `*_llm` version gives recommended fields a mean
+score of 81.8 and faithfulness 0.883, with no LLM call; adding a new glm-5.2 version gives
+84.4 and 0.892 at one call per KO (Section 9).
 
 ---
 
@@ -683,6 +775,10 @@ repeat it under the current rules.
 | Hand-typed term lists (generic words, agricultural terms) | Not reproducible across languages; replaced by corpus IDF and the platform vocabularies |
 | Per-language document frequencies for density | Only five languages have 200+ KOs; the rest scored as maximally specific. Replaced by wordfreq general-language frequencies |
 | `mDeBERTa-v3-base-xnli-multilingual-nli-2mil7` for NLI | 0.775 vs 0.938 for XLM-R large on the true-vs-swapped test |
+| Open-set langdetect for the cross-lingual gate | Reads short fields wrongly ("personal development, dairy farming" came out French); replaced by the wordfreq known-word share |
+| `--resummarise` from the export's extracted text | The stored text can be a translation of the file (a Lithuanian factsheet's stored text was English); the file itself is downloaded and read as page images, export text kept only as the per-KO fallback |
+| `--resummarise` in one call, 50-page cap, pages stacked into 12 tiles (versions 12-14) | Pages lost resolution in the tiles, longer documents were cut, a 6,700-word PDF was rejected by the endpoint, and videos were skipped; replaced by per-chunk notes merged hierarchically, verified and revised, with videos transcribed (version 15) |
+| English reference with a document-language secondary summary (version 14) | Non-English fields were still measured against English; replaced by the document-language summary as the reference, with an English version for the corpus row (version 15) |
 
 ---
 
@@ -706,16 +802,20 @@ used.
 | specificity | Li & Nenkova (AAAI 2015); Ko, Durrett & Li (AAAI 2019) | specificity is an established, measurable property of text | informs density; their models are English-only |
 | acronyms | Veyseh et al. (COLING 2020) | acronym identification as a task; supports the acronym part of clarity | informs clarity |
 | multilingual readability | ReadMe++ (Naous et al., EMNLP 2024) | benchmark for five languages; supports treating formula readability as coarse | informs limits; not EU coverage |
-| dense retrieval | DPR (Karpukhin et al., EMNLP 2020); BEIR (Thakur et al., NeurIPS 2021) | dense retrieval for semantic findability; BM25 as a robust baseline; nDCG discount | **yes** |
-| embedding model choice | MTEB (Muennighoff et al., EACL 2023); MMTEB (Enevoldsen et al., ICLR 2025) | multilingual E5 is the best public model on MMTEB | **yes** |
+| dense retrieval | DPR (Karpukhin et al., EMNLP 2020); BEIR (Thakur et al., NeurIPS 2021); Burges et al. (ICML 2005) | dense retrieval for semantic findability; BM25 as a robust baseline; the nDCG discount | **yes** |
+| embedding model choice | MTEB (Muennighoff et al., EACL 2023); MMTEB (Enevoldsen et al., ICLR 2025) | the best public model on MMTEB is multilingual-e5-large-instruct; the same family's small variant is used | **yes** |
 | web-text quality filters | FineWeb (Penedo et al., NeurIPS 2024); FineWeb2 (Penedo et al., COLM 2025); Dodge et al. (EMNLP 2021) | the filter set and thresholds; per-language stop words | **yes** - content report |
 | language mislabelling | Kreutzer et al. (TACL 2022) | declared vs detected language check | **yes** - content report |
 | metric validation | CheckList (Ribeiro et al., ACL 2020); Sai et al. (EMNLP 2021) | perturbation self-test | **yes** |
-| LLM judges and their biases | MT-Bench (Zheng et al., NeurIPS 2023); Wang et al. (ACL 2024); G-Eval (Liu et al., EMNLP 2023) | verdicts are checked by measurement, never trusted alone | **yes** - review design |
+| LLM judges and their biases | MT-Bench (Zheng et al., NeurIPS 2023); Wang et al. (ACL 2024); G-Eval (Liu et al., EMNLP 2023) | the LLM is one pillar of four, and the recommendation's faithfulness condition uses the measured accuracy | **yes** - the LLM pillar |
+| multilingual LLM evaluators | Hada et al. (Findings of EACL 2024) | LLM evaluators are less reliable on non-English text; the judge's prompt names the languages involved and asks for meaning to be rated across them without penalising the language | **yes** - the LLM pillar's language line |
 | over-optimising a proxy | Gao, Schulman & Hilton (ICML 2023) | faithfulness as a hard constraint on accepting LLM proposals | **yes** |
 | deferring uncertain cases | Geifman & El-Yaniv (NeurIPS 2017) | the gate's LLM band | **yes** |
 | multi-metric reporting | HELM (Liang et al., TMLR 2023) | report pillars and fields next to the composite | **yes** |
 | sentence embeddings | Sentence-BERT (Reimers & Gurevych, EMNLP 2019) | the gate classifier's encoder | **yes** |
+| long-document summarisation (`--resummarise`) | BooookScore (Chang et al., ICLR 2024) | hierarchical merging of chunk-level notes, the more coherent of the two workflows it compares | **yes** |
+| summary verification (`--resummarise`) | Chain-of-Verification (Dhuliawala et al., Findings of ACL 2024) | draft, verify against the source independently, revise | **yes**, adapted to documents |
+| speech transcription (`--resummarise`) | Whisper (Radford et al., ICML 2023) | zero-shot multilingual transcription of video and audio files | **yes** |
 
 **What these venues do not cover.** The metadata-quality criteria themselves - accuracy,
 completeness, coherence, conformance, provenance - come from digital-library and
@@ -740,6 +840,8 @@ techniques.
 - Björnsson, C. H. (1968). *Läsbarhet*. Stockholm: Liber.
 - Björnsson, C. H. (1983). Readability of newspapers in 11 languages. *Reading Research Quarterly*, 18(4), 480-497.
 - Bruce, T. R., & Hillmann, D. I. (2004). The continuum of metadata quality: defining, expressing, exploiting. In D. I. Hillmann & E. L. Westbrooks (Eds.), *Metadata in Practice* (pp. 238-256). ALA Editions.
+- Burges, C., Shaked, T., Renshaw, E., Lazier, A., Deeds, M., Hamilton, N., & Hullender, G. (2005). Learning to rank using gradient descent. *ICML 2005*, 89-96.
+- Chang, Y., Lo, K., Goyal, T., & Iyyer, M. (2024). BooookScore: a systematic exploration of book-length summarization in the era of LLMs. *ICLR 2024*. arXiv:2310.00785.
 - Chen, T. Y., Cheung, S. C., & Yiu, S. M. (1998). *Metamorphic testing: a new approach for generating next test cases*. Technical Report HKUST-CS98-01, Hong Kong University of Science and Technology.
 - Chow, C. K. (1970). On optimum recognition error and reject tradeoff. *IEEE Transactions on Information Theory*, 16(1), 41-46.
 - Conneau, A., Rinott, R., Lample, G., Williams, A., Bowman, S., Schwenk, H., & Stoyanov, V. (2018). XNLI: evaluating cross-lingual sentence representations. *EMNLP 2018*. arXiv:1809.05053.
@@ -747,6 +849,7 @@ techniques.
 - Dawes, R. M. (1979). The robust beauty of improper linear models in decision making. *American Psychologist*, 34(7), 571-582.
 - Derringer, G., & Suich, R. (1980). Simultaneous optimization of several response variables. *Journal of Quality Technology*, 12(4), 214-219.
 - Devaraju, A., & Huber, R. (2021). An automated solution for measuring the progress toward FAIR research data. *Patterns*, 2(11), 100370.
+- Dhuliawala, S., Komeili, M., Xu, J., Raileanu, R., Li, X., Celikyilmaz, A., & Weston, J. (2024). Chain-of-Verification reduces hallucination in large language models. *Findings of ACL 2024*, 3563-3578. arXiv:2309.11495.
 - Diakoulaki, D., Mavrotas, G., & Papayannakis, L. (1995). Determining objective weights in multiple criteria problems: the CRITIC method. *Computers & Operations Research*, 22(7), 763-770.
 - Dodge, J., Sap, M., Marasović, A., Agnew, W., Ilharco, G., Groeneveld, D., Mitchell, M., & Gardner, M. (2021). Documenting large webtext corpora: a case study on the Colossal Clean Crawled Corpus. *EMNLP 2021*.
 - Enevoldsen, K., et al. (2025). MMTEB: Massive Multilingual Text Embedding Benchmark. *ICLR 2025*. arXiv:2502.13595.
@@ -756,6 +859,7 @@ techniques.
 - Gao, L., Schulman, J., & Hilton, J. (2023). Scaling laws for reward model overoptimization. *ICML 2023*.
 - Geifman, Y., & El-Yaniv, R. (2017). Selective classification for deep neural networks. *NeurIPS 2017*.
 - Google Search Central (2026). *Dataset structured data*; *Influencing title links*; *Control your snippets in search results*. developers.google.com/search/docs.
+- Hada, R., Gumma, V., de Wynter, A., Diddee, H., Ahmed, M., Choudhury, M., Bali, K., & Sitaram, S. (2024). Are large language model-based evaluators the solution to scaling up multilingual evaluation? *Findings of EACL 2024*, 1051-1070. arXiv:2309.07462.
 - He, P., Gao, J., & Chen, W. (2023). DeBERTaV3: improving DeBERTa using ELECTRA-style pre-training with gradient-disentangled embedding sharing. *ICLR 2023*.
 - ISO/IEC 25012:2008. *Software engineering - Software product Quality Requirements and Evaluation (SQuaRE) - Data quality model*.
 - ISO/IEC 25024:2015. *Systems and software engineering - SQuaRE - Measurement of data quality*.
@@ -771,7 +875,7 @@ techniques.
 - Liang, P., et al. (2023). Holistic evaluation of language models. *Transactions on Machine Learning Research*.
 - Lin, C.-Y. (2004). ROUGE: a package for automatic evaluation of summaries. *Text Summarization Branches Out (ACL Workshop)*, 74-81.
 - Liu, Y., Iter, D., Xu, Y., Wang, S., Xu, R., & Zhu, C. (2023). G-Eval: NLG evaluation using GPT-4 with better human alignment. *EMNLP 2023*.
-- Manheim, D., & Garrabrant, S. (2018). Categorizing variants of Goodhart's law. arXiv:1803.04585.
+- Manning, C. D., Raghavan, P., & Schütze, H. (2008). *Introduction to Information Retrieval*. Cambridge University Press. Chapter 6, "Sublinear tf scaling".
 - McCarthy, P. M., & Jarvis, S. (2010). MTLD, vocd-D, and HD-D: a validation study of sophisticated approaches to lexical diversity assessment. *Behavior Research Methods*, 42(2), 381-392.
 - Min, S., Krishna, K., Lyu, X., Lewis, M., Yih, W., Koh, P. W., Iyyer, M., Zettlemoyer, L., & Hajishirzi, H. (2023). FActScore: fine-grained atomic evaluation of factual precision in long form text generation. *EMNLP 2023*.
 - Muennighoff, N., Tazi, N., Magne, L., & Reimers, N. (2023). MTEB: Massive Text Embedding Benchmark. *EACL 2023*.
@@ -782,8 +886,11 @@ techniques.
 - Ochoa, X., & Duval, E. (2006). Quality metrics for learning object metadata. *Proceedings of ED-MEDIA 2006, World Conference on Educational Multimedia, Hypermedia and Telecommunications*, 1004-1011.
 - Ochoa, X., & Duval, E. (2009). Automatic evaluation of metadata quality in digital repositories. *International Journal on Digital Libraries*, 10(2-3), 67-91.
 - Park, J.-R. (2009). Metadata quality in digital repositories: a survey of the current state of the art. *Cataloging & Classification Quarterly*, 47(3-4), 213-228.
+- OpenSearch (2026). *Keyword search: BM25 similarity parameters* (k1 default 1.2, b default 0.75). docs.opensearch.org.
+- Panickssery, A., Bowman, S. R., & Feng, S. (2024). LLM evaluators recognize and favor their own generations. *NeurIPS 2024*.
 - Penedo, G., Kydlíček, H., Ben Allal, L., Lozhkov, A., Mitchell, M., Raffel, C., Von Werra, L., & Wolf, T. (2024). The FineWeb datasets: decanting the web for the finest text data at scale. *NeurIPS 2024 Datasets and Benchmarks*. arXiv:2406.17557.
 - Penedo, G., Kydlíček, H., Sabolčec, V., Messmer, B., Foroutan, N., Kargaran, A. H., Raffel, C., Jaggi, M., Von Werra, L., & Wolf, T. (2025). FineWeb2: one pipeline to scale them all - adapting pre-training data processing to every language. *COLM 2025*. arXiv:2506.20920.
+- Radford, A., Kim, J. W., Xu, T., Brockman, G., McLeavey, C., & Sutskever, I. (2023). Robust speech recognition via large-scale weak supervision. *ICML 2023*, PMLR 202, 28492-28518. arXiv:2212.04356.
 - Rae, J. W., et al. (2021). Scaling language models: methods, analysis & insights from training Gopher. arXiv:2112.11446.
 - Raffel, C., et al. (2020). Exploring the limits of transfer learning with a unified text-to-text transformer. *Journal of Machine Learning Research*, 21(140), 1-67. arXiv:1910.10683.
 - Reimers, N., & Gurevych, I. (2019). Sentence-BERT: sentence embeddings using Siamese BERT-networks. *EMNLP-IJCNLP 2019*. arXiv:1908.10084.

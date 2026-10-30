@@ -72,6 +72,8 @@ which_fields_to_choose/opensearch_mapping_final_improved_13_02_2026.json
 data_model_v2/
 florence/
 assess_ko_quality/output/
+# LLM answers, transcripts and downloaded files (core/llm.py, stages/resummarise.py)
+assess_ko_quality/.cache/
 summary_evaluation/output/
 which_model_to_choose/output/
 which_model_to_choose/artifacts/
@@ -117,6 +119,9 @@ USING_LLMS.md
 !assess_ko_quality/README.md
 !assess_ko_quality/METHODS.md
 !assess_ko_quality/LITERATURE_REVIEW.md
+!assess_ko_quality/METHOD_NO_SOURCES.md
+!assess_ko_quality/SOURCES.md
+!assess_ko_quality/How_the_KO_quality_pipeline_flows.png
 !assess_ko_quality/validation/*.json
 !assess_ko_quality/validation/gate_validation/*.json
 !assess_ko_quality/validation/runs/*.md

@@ -1,0 +1,58 @@
+# Direct dependencies: every package the repo imports, plus the ones it loads by name
+# (evaluate -> bert-score/rouge-score, tokenizers -> sentencepiece/protobuf).
+# requirements.txt is resolved from this file; regenerate it with
+#   uv pip compile requirements.in --upgrade --extra-index-url https://download.pytorch.org/whl/cpu \
+#       --index-strategy unsafe-best-match --emit-index-url --no-header --no-annotate -o requirements.txt
+# The spaCy model (en_core_web_lg) is deliberately not here: pip re-downloads a URL wheel on
+# every install. It is only needed by tools/*_diagnostics.py and legacy/: python -m spacy download en_core_web_lg
+
+# numerics / tables
+numpy
+pandas
+scipy
+scikit-learn
+joblib
+
+# plots
+matplotlib
+seaborn
+
+# text / language
+nltk
+spacy
+langdetect
+langcodes
+wordfreq
+rapidfuzz
+pyspellchecker
+tiktoken
+
+# models (floors stop the resolver backtracking to an ancient datasets/evaluate instead of lowering fsspec)
+torch
+transformers>=5
+sentence-transformers
+huggingface-hub
+sentencepiece
+protobuf
+evaluate>=0.4.6
+datasets>=4
+bert-score
+rouge-score
+
+# LLM endpoints
+openai
+requests
+tenacity
+
+# files and formats
+pymupdf
+openpyxl
+xlrd
+python-docx
+pillow
+orjson
+pyyaml
+python-dotenv
+jsonschema
+rdflib
+tqdm
