@@ -649,9 +649,12 @@ changes.
   (Section 6). Accepted for now; the planned check is the self-test's (9.1).
 - **Factual correctness of the file itself is not assessed.** The score checks that the
   metadata agrees with the summary, not that the file's advice is right.
-- **Cost.** 25-70 s per KO on CPU in the runs so far (reference: the file), mostly NLI;
-  not yet measured with the summary as the reference. The LLM pillar adds up to 8 calls
-  per KO.
+- **Cost.** About 100 s per KO on CPU: 98-102 s in the October 2026 runs with the summary
+  as the reference and the LLM answers mostly cached, 134 s for two long PDFs that were
+  resummarised (Intel Core Ultra 9 185H laptop). Nearly all of it is the embedding and
+  entailment models. The full export of 11,627 KOs needs about 13 days of CPU time at this
+  rate, plus the wait for any LLM calls not already cached. The LLM pillar adds up to 8
+  calls per KO.
 
 ---
 

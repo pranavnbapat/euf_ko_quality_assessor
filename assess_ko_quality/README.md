@@ -43,8 +43,13 @@ python pipeline.py --limit 200 --no-llm-score --no-gate-llm --use-existing-llm
 The first run on an export builds a corpus index: about 20 minutes the very first time
 (it embeds every KO once), about 5 minutes after a settings change, seconds otherwise. It
 is cached in `output/_corpus_cache/`, and switching the reference text between the
-summary and the file rebuilds it. Assessment then takes 25-70 seconds per KO on CPU in
-the runs so far (measured with the file as the reference), mostly the entailment model.
+summary and the file rebuilds it. Assessment then takes about 100 seconds per KO on CPU:
+98-102 s in the October 2026 runs with the summary as the reference and the LLM answers
+mostly cached, and 134 s for two long PDFs whose summaries were rewritten, on an Intel
+Core Ultra 9 185H laptop. Nearly all of it is the two transformer models; in a profile of
+one KO the entailment model took about a third and the embedding model about half. At
+this rate the full export of 11,627 KOs needs about 13 days of CPU time, plus the wait for
+any LLM calls not already cached.
 
 **LLM calls.** Only five things can call an LLM:
 - **The `*_llm` fields**: one call per KO with a summary, writing all four fields fresh
