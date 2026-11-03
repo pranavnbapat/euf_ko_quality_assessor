@@ -230,7 +230,7 @@ Everything you need to read is in **one file, `report.xlsx`**:
 | Run | run | arguments, selection counts, what the fields were measured against, models, the LLM pillar's model and calls, self-test and rank-stability results |
 | KOs | KO | the score of each version (contributor, the LLM one), the contributor's four pillars and field scores, the recommended version per field, gate / compliance / content flags, and the weakest parts with the reason for each |
 | Fields | KO × field × version | the text, the field score, the four pillars (the LLM score next to the three measured ones), all 10 sub-pillars, faithfulness to the summary, whether it is the recommended version, and the LLM's reason |
-| Summaries | KO | the reference summary the fields were measured against, its source and language; with `--resummarise` also its basis (file kind, pages, chunks, calls, what the verification found), its English version and the platform's summary it replaced |
+| Summaries | KO | the reference summary the fields were measured against, its source and language; with `--resummarise` also its basis (file kind, pages, chunks, calls, what the verification found and, for a document longer than one chunk, how many sentences got no verdict), its English version and the platform's summary it replaced |
 | Self-test | deliberate defect (with `--selftest`) | whether each sub-pillar noticed |
 
 `details.jsonl`, written next to it, is the raw archive with every piece of evidence,

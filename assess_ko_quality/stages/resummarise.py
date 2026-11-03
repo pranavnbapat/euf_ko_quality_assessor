@@ -32,9 +32,19 @@ How the summary is written:
                    time until one summary remains - coherence over the extra detail
                    of incremental updating, which the same study measured.
   verification     Chain-of-Verification (Dhuliawala et al., Findings of ACL 2024),
-                   adapted: one call per chunk reads the draft against those pages
-                   and lists statements they contradict and major content they lack;
-                   one revision call applies every finding. No findings, no revision.
+                   adapted: the draft is read against its source for statements the
+                   source contradicts or does not support, and for major content it
+                   lacks; one revision call applies every finding. No findings, no
+                   revision. A source in one chunk is checked in one call. A longer
+                   one is checked one chunk per call, sentence by sentence, because a
+                   chunk cannot tell a wrong statement from one about other pages:
+                   each chunk gives every numbered sentence a verdict (supported,
+                   contradicted, absent) and the code decides across chunks. A
+                   sentence is supported when any chunk supports it, as AlignScore
+                   (Zha et al., ACL 2023) and SummaC-ZS (Laban et al., TACL 2022)
+                   keep each sentence's best score over the source's parts; an error
+                   when a chunk contradicts it and none supports it; unsupported
+                   when every chunk reports it absent.
   translation      a non-English summary is translated to English for the corpus row
                    (the only call whose output is not the reference).
 
@@ -52,6 +62,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import shutil
 import subprocess
 import tempfile
@@ -128,23 +139,116 @@ def merge_brief(parts: Sequence[str], language: str, final: bool) -> str:
     return body + "\n\n=== TASK ===\n" + task
 
 
-def verify_brief(draft: str, scope: str, partial: bool) -> str:
-    """Chain-of-Verification, adapted: the draft read against the source it came from."""
-    note = ("A statement may be supported by other pages of the document, so list under "
-            "errors only what THESE pages contradict." if partial else
-            "List under errors every statement that nothing in the document supports.")
+def verify_brief(draft: str, scope: str) -> str:
+    """Chain-of-Verification, adapted: the draft read against the whole source at once."""
     return f"""=== DRAFT SUMMARY ===
 {draft}
 
 === TASK ===
 Check the draft summary against {scope}, fact by fact.
 - errors: statements in the draft that are wrong about {scope} - a wrong number, name,
-  date, finding or claim. {note} Quote the statement and say what {scope} actually
+  date, finding or claim. List under errors every statement that nothing in the document supports. Quote the statement and say what {scope} actually
   say(s).
 - missing: major topics, sections or findings in {scope} that the draft does not cover.
 Only what you can see; empty lists when there is nothing. Write in the draft's language.
 Return JSON only: {{"errors": ["<statement - correction>", ...], \
 "missing": ["<what is missing>", ...]}}"""
+
+
+def verify_sentences_brief(sentences: Sequence[str], scope: str) -> str:
+    """One chunk of a longer source: a verdict per numbered sentence (see combine_verdicts)."""
+    numbered = "\n".join(f"[{n}] {s}" for n, s in enumerate(sentences, 1))
+    return f"""=== DRAFT SUMMARY, ONE SENTENCE PER NUMBER ===
+{numbered}
+
+=== TASK ===
+You see only part of the document: {scope}. The rest is on other pages. Check every
+numbered sentence against {scope}, fact by fact, and give each one a verdict:
+- "supported": {scope} state it, or part of it, and contradict none of it;
+- "contradicted": {scope} say something different - a different number, name, date,
+  finding or claim. Say what {scope} actually say;
+- "absent": {scope} neither state nor contradict it. This is expected for content
+  from other pages and is not an error.
+Then list under missing the major topics, sections or findings in {scope} that the
+draft does not cover. Only what you can see. Write in the draft's language.
+Return JSON only: {{"verdicts": [{{"n": 1, "verdict": "supported", "correction": ""}}, ...], \
+"missing": ["<what is missing>", ...]}}
+One verdict for every number; "correction" only for contradicted sentences."""
+
+
+# A sentence ends at . ! ? or an ellipsis, then optional closing quotes or brackets, a
+# space and a capital letter or an opening quote. Not after a word of one or two letters
+# or one with a full stop inside (Dr., e.g., U.S.): a split missed there only gives two
+# sentences one verdict.
+_SENTENCE_END = re.compile(r"[.!?…]+[\"'”’»)\]]*\s+")
+_OPENERS = "\"'“‘„«(["
+
+
+def _sentences(text: str) -> List[str]:
+    out: List[str] = []
+    start = 0
+    for m in _SENTENCE_END.finditer(text):
+        after = text[m.end():m.end() + 1]
+        if not after or not (after.isupper() or after in _OPENERS):
+            continue
+        words = text[start:m.start()].split()
+        last = words[-1].strip(_OPENERS) if words else ""
+        if len(last) <= 2 or "." in last:
+            continue
+        out.append(text[start:m.end()].strip())
+        start = m.end()
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def _verdicts(raw: Dict[str, Any], n_sentences: int) -> Dict[int, Tuple[str, str]]:
+    """{sentence number: (verdict, correction)} from one chunk's answer; anything malformed
+    is dropped, so that sentence simply has no verdict from this chunk."""
+    out: Dict[int, Tuple[str, str]] = {}
+    for item in raw.get("verdicts") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            n = int(item.get("n"))
+        except (TypeError, ValueError):
+            continue
+        word = _clean(item.get("verdict")).lower()
+        verdict = ("supported" if word.startswith("support") else
+                   "contradicted" if word.startswith("contradict") else
+                   "absent" if word.startswith("absent") else "")
+        if verdict and 1 <= n <= n_sentences:
+            out[n] = (verdict, _clean(item.get("correction")))
+    return out
+
+
+def combine_verdicts(sentences: Sequence[str], per_chunk: Sequence[Dict[int, Tuple[str, str]]]
+                     ) -> Tuple[List[str], int]:
+    """
+    One decision per sentence from every chunk's verdict. Supported by any chunk: kept.
+    Contradicted by a chunk and supported by none: an error, with the correction.
+    Reported absent by every chunk: unsupported, since nothing in the document states
+    it. A sentence that some chunk gave no verdict on is never called unsupported, so a
+    malformed answer cannot delete a true statement. Returns (errors, unverified), where
+    unverified counts the sentences no chunk gave any verdict on.
+    """
+    errors: List[str] = []
+    unverified = 0
+    for n, sentence in enumerate(sentences, 1):
+        given = [v[n] for v in per_chunk if n in v]
+        if not given:
+            unverified += 1
+            continue
+        if any(verdict == "supported" for verdict, _ in given):
+            continue
+        corrections = [c for verdict, c in given if verdict == "contradicted"]
+        if corrections:
+            errors.append(f"{sentence} - " + ("; ".join(c for c in corrections if c)
+                                              or "contradicted by the document"))
+        elif len(given) == len(per_chunk):
+            errors.append(f"{sentence} - nothing in the document states this")
+    return errors, unverified
 
 
 def revise_brief(draft: str, errors: Sequence[str], missing: Sequence[str], language: str) -> str:
@@ -312,10 +416,10 @@ def _render_pdf(data: bytes, dpi: int, max_pages: int, quality: int
     Every page (or the first `max_pages` when capped) as a JPEG image part, encoded as
     it is rendered so a long document never holds hundreds of bitmaps; the page count.
     """
-    import fitz                                  # PyMuPDF
+    import pymupdf
     from PIL import Image
 
-    doc = fitz.open(stream=data, filetype="pdf")
+    doc = pymupdf.open(stream=data, filetype="pdf")
     pages = doc[:max_pages] if max_pages > 0 else doc
     parts = []
     for p in pages:
@@ -590,13 +694,22 @@ def summarise(client, src: Source, cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     errors: List[str] = []
     missing: List[str] = []
+    checked: Dict[str, int] = {}
     revised = False
     if cfg.get("verify", True):
-        partial = len(src.chunks) > 1
-        for chunk in src.chunks:
-            raw = ask(chunk, verify_brief(draft, src.part_scope if partial else src.scope, partial))
-            errors += [_clean(x) for x in (raw.get("errors") or []) if _clean(x)]
-            missing += [_clean(x) for x in (raw.get("missing") or []) if _clean(x)]
+        if len(src.chunks) == 1:
+            raw = ask(src.chunks[0], verify_brief(draft, src.scope))
+            errors = [_clean(x) for x in (raw.get("errors") or []) if _clean(x)]
+            missing = [_clean(x) for x in (raw.get("missing") or []) if _clean(x)]
+        else:
+            sentences = _sentences(draft)
+            per_chunk = []
+            for chunk in src.chunks:
+                raw = ask(chunk, verify_sentences_brief(sentences, src.part_scope))
+                per_chunk.append(_verdicts(raw, len(sentences)))
+                missing += [_clean(x) for x in (raw.get("missing") or []) if _clean(x)]
+            errors, unverified = combine_verdicts(sentences, per_chunk)
+            checked = {"sentences": len(sentences), "unverified": unverified}
         if errors or missing:
             raw = ask([], revise_brief(draft, errors, missing, language))
             text = _clean(raw.get("summary"))
@@ -613,7 +726,7 @@ def summarise(client, src: Source, cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {"summary": draft, "summary_en": summary_en, "language": language,
             "calls": calls, "chunks": len(src.chunks), "chunk_pages": chunk_pages,
             "errors": len(errors), "missing": len(missing), "findings": errors + missing,
-            "revised": revised, "translated": translated}
+            "revised": revised, "translated": translated, **checked}
 
 
 def generate(records: Sequence[Dict[str, Any]], spec: Dict[str, Any],
@@ -702,6 +815,9 @@ def generate(records: Sequence[Dict[str, Any]], spec: Dict[str, Any],
         b.update({"file_language": res["language"], "chunks": res["chunks"], "calls": res["calls"],
                   "errors": res["errors"], "missing": res["missing"], "revised": res["revised"],
                   "translated": res["translated"], "findings": res["findings"][:20]})
+        for key in ("sentences", "unverified"):          # sentence-level check only
+            if key in res:
+                b[key] = res[key]
         basis[kid] = b
         calls += res["calls"]
         retried += b.get("from") == "export_text" and "after" in b

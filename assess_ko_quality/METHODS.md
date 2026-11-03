@@ -193,9 +193,25 @@ updating a running summary" - and found that "Incremental updating yields lower
 BooookScore but higher level of detail than hierarchical merging"; coherence is chosen
 here. Every draft is then **verified against its source**, following
 Chain-of-Verification (Dhuliawala et al., Findings of ACL 2024), adapted to a
-document: one call per chunk reads the draft against those pages and lists statements
-they contradict and major content they lack, and one revision call applies every
-finding; with no findings there is no revision call. Last, a non-English summary is
+document. A source of one chunk is checked in one call, which lists the statements the
+source contradicts or does not support and the major content the draft lacks. A
+longer document is checked one chunk per call, **sentence by sentence**, because one
+chunk cannot tell a wrong statement from one about other pages: the draft is split
+into numbered sentences, each chunk gives every sentence a verdict - supported,
+contradicted, or absent from these pages - and lists the content the draft lacks, and
+the decision is taken across chunks. A sentence is kept when any chunk supports it.
+This is how chunked factual-consistency checkers combine evidence: AlignScore (Zha et
+al., ACL 2023, §3.2) splits the context into chunks, and "The highest alignment score
+of each claim sentence is selected and then averaged to derive the factual
+consistency score"; SummaC-ZS (Laban et al., TACL 2022, §3.2), the rule the accuracy
+sub-pillar already uses (§5.2), keeps for each summary sentence "the score for the
+document sentence that provides the strongest support for each summary sentence". A
+sentence is an error when a chunk contradicts it and none supports it, and
+unsupported when every chunk reports it absent. A sentence that a chunk gave no
+verdict on is never called unsupported, so a malformed answer cannot delete a true
+statement; sentences with no verdict at all are counted (`unverified`). One revision
+call then applies every finding; with no findings there is no revision call. Last, a
+non-English summary is
 **translated to English** for the corpus row. The prompts keep the platform
 summariser's brief - every major topic, entities and numbers preserved, proportional
 length - and ask for the document's language, which the model names from the pages
@@ -654,6 +670,12 @@ changes.
   sound transcribed by Whisper, frames shown with the transcript. Long documents are
   summarised by hierarchical merging of per-chunk notes; every draft is verified
   against its pages and revised when the check finds errors or gaps (§4c).
+- Amended 31 October 2026: a document longer than one chunk is verified sentence by
+  sentence, with the verdicts combined across chunks (§4c). Before, each chunk listed
+  errors itself and flagged statements that were simply on other pages: on a 33-page
+  document 12 of 13 listed errors were of that kind, and the revision removed two
+  true figures. Documents of one chunk are verified as before, so their summaries and
+  cached calls are unchanged.
 - BM25 findability gates on the corpus index's language (English) rather than the
   reference's; key terms for coverage are filtered with the reference's own language;
   the keyword diversity stemmer follows the reference's language.

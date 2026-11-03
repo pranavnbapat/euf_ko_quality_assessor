@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 import requests
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam

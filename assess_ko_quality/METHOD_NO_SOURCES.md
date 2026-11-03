@@ -175,9 +175,15 @@ images-per-prompt limit), a transcript with frames, or a text is drafted in one 
 A longer document is summarised in parts: detailed notes per chunk of 12 pages,
 merged eight at a time until one summary remains (hierarchical merging; coherence
 over the extra detail an incrementally updated summary gives). Every draft is then
-**verified against its source**: one call per chunk reads the draft against those
-pages and lists statements they contradict and major content they lack, and one
-revision call applies every finding; with no findings there is no revision call.
+**verified against its source**. A source of one chunk is checked in one call, which
+lists the statements the source contradicts or does not support and the major content
+the draft lacks. A longer document is checked one chunk per call, sentence by
+sentence, because one chunk cannot tell a wrong statement from one about other pages:
+each chunk gives every numbered sentence of the draft a verdict - supported,
+contradicted, or absent from these pages - and the decision is taken across chunks. A
+sentence is kept when any chunk supports it, is an error when a chunk contradicts it
+and none supports it, and is unsupported when every chunk reports it absent. One
+revision call then applies every finding; with no findings there is no revision call.
 Last, a non-English summary is translated to English for the corpus row. The prompts
 keep the platform summariser's brief - every major topic, entities and numbers
 preserved, proportional length - and ask for the document's language, which the

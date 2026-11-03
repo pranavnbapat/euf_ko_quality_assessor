@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import sys
 import time
@@ -70,10 +71,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from core.corpus_index import summary_text
-from core.io_utils import _latest_json_file, _read_json_any, ensure_directory
-from core.text_utils import norm_text
-from stages import compliance as compliance_stage
+from core.llm import merged_env
+
+# Hugging Face, set before anything imports it: the HF_TOKEN from the same .env files the
+# LLM client reads, so model requests are authenticated, and no progress bars, since the
+# models load from the local cache on every run. An exported variable wins over both.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+if not os.environ.get("HF_TOKEN") and merged_env().get("HF_TOKEN"):
+    os.environ["HF_TOKEN"] = merged_env()["HF_TOKEN"]
+
+from core.corpus_index import summary_text  # noqa: E402
+from core.io_utils import _latest_json_file, _read_json_any, ensure_directory  # noqa: E402
+from core.text_utils import norm_text  # noqa: E402
+from stages import compliance as compliance_stage  # noqa: E402
 
 
 

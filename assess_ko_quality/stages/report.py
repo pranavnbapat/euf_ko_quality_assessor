@@ -241,9 +241,11 @@ def write(out_dir: Path, results: List[Dict[str, Any]], analysis_out: Dict[str, 
     # ---------------------------------------------------------------- Summaries
     # The reference text of every KO, as measured against; with --resummarise also its
     # English version (the corpus row) and the platform's summary it replaced.
+    # "sentences without a verdict" applies to documents checked sentence by sentence
+    # (longer than one chunk); it is empty for the rest.
     header = ["_orig_id", "source", "language", "basis", "pages", "chunks", "calls",
-              "errors found", "missing found", "revised", "words", "summary",
-              "English version", "platform summary"]
+              "errors found", "missing found", "revised", "sentences without a verdict",
+              "words", "summary", "English version", "platform summary"]
     rows = []
     for r in results:
         s = r.get("summary") or {}
@@ -252,11 +254,12 @@ def write(out_dir: Path, results: List[Dict[str, Any]], analysis_out: Dict[str, 
         rs = r.get("resummarised") or {}
         basis = (f"{rs.get('from')}:{rs.get('kind')}" + (f" after {rs['after']}" if rs.get("after") else "")
                  if rs else None)
+        unverified = (f"{rs['unverified']} of {rs['sentences']}" if "sentences" in rs else None)
         rows.append([r["_orig_id"], s.get("source"), s.get("language"), basis,
                      rs.get("pages_total"), rs.get("chunks"), rs.get("calls"),
-                     rs.get("errors"), rs.get("missing"), rs.get("revised"),
+                     rs.get("errors"), rs.get("missing"), rs.get("revised"), unverified,
                      s.get("words"), s.get("text"), s.get("english"), s.get("platform")])
-    _sheet(wb, "Summaries", header, rows, {1: 26, 4: 24, 12: 90, 13: 90, 14: 70})
+    _sheet(wb, "Summaries", header, rows, {1: 26, 4: 24, 13: 90, 14: 90, 15: 70})
 
     # ---------------------------------------------------------------- Self-test
     if selftest:

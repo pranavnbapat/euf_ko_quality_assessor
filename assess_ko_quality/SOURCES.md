@@ -117,7 +117,7 @@ descriptors" (Google Search Central, title links), and datasets should have uniq
 | generation (version 12) | brief | blind - the summary and the published rules only, never the contributor's fields; written in the document's language; at most 10 keywords | choice + convention | blind generation keeps the text under assessment out of the writer's context; 10 follows the usual keyphrase cut-offs (Meng et al. 2017); the count is never scored |
 | resummarise (version 15) | file handling | the file downloaded from its URL and read as it is: PDF and image pages as images (one per image, no page cap), office files converted to PDF first, a video's sound transcribed by Whisper and its frames shown, an audio file as its transcript | choice + published model | the export's stored text can be a translation of the file, so the file itself is read; 12 images per prompt is the provider's measured limit; Whisper (Radford et al., ICML 2023) transcribes zero-shot across languages |
 | resummarise (version 15) | long documents | notes per chunk of 12 pages, merged 8 at a time until one summary remains | published method | hierarchical merging, the more coherent of the two workflows BooookScore compares (Chang et al., ICLR 2024) |
-| resummarise (version 15) | verification | every draft read against each chunk of its source for contradicted statements and missing content; one revision call applies the findings; none when there are none | published method, adapted | Chain-of-Verification (Dhuliawala et al., Findings of ACL 2024): draft, verify independently, revise |
+| resummarise (version 15) | verification | every draft read against its source for contradicted or unsupported statements and missing content; a source longer than one chunk checked sentence by sentence, each chunk giving every sentence a verdict (supported, contradicted, absent) and a sentence kept when any chunk supports it; one revision call applies the findings; none when there are none | published methods, adapted | Chain-of-Verification (Dhuliawala et al., Findings of ACL 2024): draft, verify independently, revise; across chunks, each sentence's best support counts, as in AlignScore (Zha et al., ACL 2023) and SummaC-ZS (Laban et al., TACL 2022) |
 | resummarise (version 15) | summary language | the document's own, named by the model from the pages; an English translation for the corpus row | design decision (30 October 2026) | a non-English KO's fields are then measured in their own language; the corpus index stays English, so BM25 findability gates on the index's language |
 | aggregation | weights | equal at every level | common practice | OECD/JRC (2008): most composite indicators use equal weights; Dawes (1979) |
 | aggregation | empty field, subtitle included | scores 0 | published method | Ochoa & Duval (2006) completeness: counts the fields that hold a value |
@@ -182,6 +182,7 @@ descriptors" (Google Search Central, title links), and datasets should have uniq
 | sentence embeddings | Sentence-BERT (Reimers & Gurevych, EMNLP 2019) | the gate classifier's encoder | **yes** |
 | long-document summarisation (`--resummarise`) | BooookScore (Chang et al., ICLR 2024) | hierarchical merging of chunk-level notes, the more coherent of the two workflows it compares | **yes** |
 | summary verification (`--resummarise`) | Chain-of-Verification (Dhuliawala et al., Findings of ACL 2024) | draft, verify against the source independently, revise | **yes**, adapted to documents |
+| verdicts across chunks (`--resummarise`) | AlignScore (Zha et al., ACL 2023); SummaC-ZS (Laban et al., TACL 2022) | a draft sentence counts as supported when any chunk of a long document supports it | **yes** |
 | speech transcription (`--resummarise`) | Whisper (Radford et al., ICML 2023) | zero-shot multilingual transcription of video and audio files | **yes** |
 
 **What these venues do not cover.** The metadata-quality criteria themselves - accuracy,
@@ -224,6 +225,13 @@ ACL Anthology (2024.findings-acl.212, pages 3563-3578), PMLR (v202/radford23a, p
 camera-ready). The sentences quoted from them - the two prompting workflows and their
 coherence/detail trade-off, the four steps of Chain-of-Verification, and the 680,000
 hours of supervision with zero-shot transfer - are from the papers' abstracts.
+
+Added on 31 October 2026, for the sentence-level verification of long documents: the
+sentences quoted from AlignScore (§3.2 and the Figure 2 caption) and SummaC (§3.2,
+SummaC-ZS) were checked word for word against the published PDFs on the ACL Anthology
+(2023.acl-long.634, pages 11328-11348; 2022.tacl-1.10, TACL volume 10, pages
+163-177). The max over the source's parts is SummaC's zero-shot variant only; its
+convolutional variant uses the whole distribution of scores instead.
 
 ---
 
@@ -313,6 +321,6 @@ hours of supervision with zero-shot transfer - are from the papers' abstracts.
 - Wilkinson, M. D., et al. (2016). The FAIR Guiding Principles for scientific data management and stewardship. *Scientific Data*, 3, 160018.
 - Wu, D., Yin, D., & Chang, K.-W. (2024). KPEval: towards fine-grained semantic-based keyphrase evaluation. *Findings of ACL 2024*, 1959-1981.
 - Yin, W., Hay, J., & Roth, D. (2019). Benchmarking zero-shot text classification: datasets, evaluation and entailment approach. *EMNLP-IJCNLP 2019*. arXiv:1909.00161.
-- Zha, Y., Yang, Y., Li, R., & Hu, Z. (2023). AlignScore: evaluating factual consistency with a unified alignment function. *ACL 2023*.
+- Zha, Y., Yang, Y., Li, R., & Hu, Z. (2023). AlignScore: evaluating factual consistency with a unified alignment function. *Proceedings of ACL 2023 (Volume 1: Long Papers)*, 11328-11348. arXiv:2305.16739.
 - Zheng, L., et al. (2023). Judging LLM-as-a-judge with MT-Bench and Chatbot Arena. *NeurIPS 2023 Datasets and Benchmarks*. arXiv:2306.05685.
 - Zhong, M., Liu, Y., Yin, D., Mao, Y., Jiao, Y., Liu, P., Zhu, C., Ji, H., & Han, J. (2022). Towards a unified multi-dimensional evaluator for text generation. *EMNLP 2022*.
