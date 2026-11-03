@@ -585,7 +585,8 @@ def main() -> None:
     ap.add_argument("--resummarise", action="store_true",
                     help="Write each assessed KO's reference summary fresh from its file, in the "
                          "document's own language. The file is fetched from its @id URL and read "
-                         "as it is: pages as images, office files converted first, a video's sound "
+                         "as it is: pages as images (a PDF over 100 pages as its own text, a PDF over "
+                         "100 MB not downloaded), office files converted first, a video's sound "
                          "transcribed and its frames shown. Long files are summarised in parts and "
                          "merged, every draft is checked against its pages and revised, and a "
                          "non-English summary is also translated to English for the search index. "

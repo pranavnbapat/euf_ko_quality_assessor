@@ -164,12 +164,19 @@ summary, its English version and the platform's summary it replaced are stored w
 the run (`details.jsonl` -> `summary`; the Summaries sheet of `report.xlsx`). The flag
 is never the default: without it the export's summary is used as it is.
 
-**The file as it is.** The file is downloaded from the `@id` URL (cached locally; up
-to 600 MB) and read as what it is, with no page cap:
-- a PDF or an image: the pages rendered to images (PyMuPDF, a visual rendering; the
-  text layer is never read), one page per image at 120 dpi. The provider's endpoint
-  rejects PDFs sent natively, so pages-as-images is the delivery (verified 8 October
-  2026);
+**The file as it is.** The file is downloaded from the `@id` URL (cached locally; a
+PDF up to 100 MB, any other file up to 600 MB) and read as what it is. No document is
+cut short:
+- a PDF of up to 100 pages, or an image: the pages rendered to images (PyMuPDF), one
+  page per image at 120 dpi. The provider's endpoint rejects PDFs sent natively, so
+  pages-as-images is the delivery (verified 8 October 2026);
+- a PDF of more than 100 pages: its own text layer instead, every page in order, in
+  chunks of at most 100,000 characters, summarised by the same hierarchical merging,
+  which BooookScore studies on book-length documents read as text (Chang et al., ICLR
+  2024). Figures, and tables drawn as images, are not seen. A text layer that fails
+  the Gopher quality filter's word rules (Rae et al. 2021, Table A1: at least 50
+  words, at least 80% of them containing a letter), as a scan without a text layer or
+  a layer of glyph codes does, sends the KO to the export's text;
 - an office document (doc/docx/ppt/pptx/xls/xlsx/odt/odp/ods/rtf): converted to PDF
   by LibreOffice headless first, then as above;
 - a video: its sound transcribed by `whisper-large-v3` through the provider's
@@ -180,12 +187,13 @@ to 600 MB) and read as what it is, with no page cap:
 
 A KO whose file cannot be fetched or read falls back to the export's text, and a file
 flow that fails retries once from the export's text; the basis of every summary is
-recorded per KO (`resummarised.from`: "file" or "export_text", with the kind, pages,
-chunks, calls and findings) and counted on the Run sheet.
+recorded per KO (`resummarised.from`: "file" or "export_text", with the kind - `pdf`
+for page images, `pdf_text` for a text layer - pages, chunks, calls and findings, and
+why the file was not used when it was not) and counted on the Run sheet.
 
 **How the summary is written.** A document of up to 12 pages (`chunk_pages`, the
-provider's images-per-prompt limit), a transcript with frames, or a text is drafted in
-one call. A longer document is summarised by **hierarchical merging** (Chang, Lo,
+provider's images-per-prompt limit), a transcript with frames, or a text of up to
+100,000 characters is drafted in one call. A longer document is summarised by **hierarchical merging** (Chang, Lo,
 Goyal & Iyyer, ICLR 2024, "BooookScore"): detailed notes per chunk of 12 pages, merged
 eight at a time (`merge_fanin`) until one summary remains. That study compared the two
 workflows - "(1) hierarchically merging chunk-level summaries, and (2) incrementally
@@ -649,12 +657,12 @@ changes.
   (Section 6). Accepted for now; the planned check is the self-test's (9.1).
 - **Factual correctness of the file itself is not assessed.** The score checks that the
   metadata agrees with the summary, not that the file's advice is right.
-- **Cost.** About 100 s per KO on CPU: 98-102 s in the October 2026 runs with the summary
-  as the reference and the LLM answers mostly cached, 134 s for two long PDFs that were
-  resummarised (Intel Core Ultra 9 185H laptop). Nearly all of it is the embedding and
-  entailment models. The full export of 11,627 KOs needs about 13 days of CPU time at this
-  rate, plus the wait for any LLM calls not already cached. The LLM pillar adds up to 8
-  calls per KO.
+- **Cost.** About 35 s per KO on CPU, one KO at a time: 32-34 s on an Intel Core Ultra 9
+  185H laptop (3 November 2026, input of 92 KOs; 94 s for the same KOs when the laptop
+  was throttled), nearly all in the embedding and entailment models. With `--resummarise`
+  the LLM stages added about 11 s per KO in a 30-KO run. The full export of 11,627 KOs
+  would take roughly 5-6 days at these rates; not yet measured on an input that large.
+  The LLM pillar adds up to 8 calls per KO.
 
 ---
 
@@ -668,7 +676,8 @@ changes.
   non-English document (replacing version 14's document-language secondary). The
   summary, its English version and the platform's are stored with every run
   (`summary` in `details.jsonl`; the Summaries sheet).
-- The file is read as it is, whatever it is: no page cap, one page per image (no
+- The file is read as it is, whatever it is: no page cap (a PDF over 100 pages is read
+  as text since 3 November 2026, below), one page per image (no
   stacking); office files converted by LibreOffice; videos and audio downloaded, the
   sound transcribed by Whisper, frames shown with the transcript. Long documents are
   summarised by hierarchical merging of per-chunk notes; every draft is verified
@@ -679,6 +688,11 @@ changes.
   document 12 of 13 listed errors were of that kind, and the revision removed two
   true figures. Documents of one chunk are verified as before, so their summaries and
   cached calls are unchanged.
+- Amended 3 November 2026: a PDF of more than 100 pages is read from its own text
+  layer instead of as page images, and a PDF over 100 MB is not downloaded (the KO
+  falls back to the export's text, with the reason recorded). Both bound a run's
+  downloads and image requests; neither cuts a document short. PDFs of up to 100
+  pages are read exactly as before, so their summaries and cached calls are unchanged.
 - BM25 findability gates on the corpus index's language (English) rather than the
   reference's; key terms for coverage are filtered with the reference's own language;
   the keyword diversity stemmer follows the reference's language.

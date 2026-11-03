@@ -158,17 +158,23 @@ version and the platform's summary it replaced are stored with the run (`summary
 `details.jsonl`; the Summaries sheet of `report.xlsx`). The flag is never the
 default: without it the export's summary is used as it is.
 
-**The file as it is.** The file is downloaded from the `@id` URL (cached locally; up
-to 600 MB) and read as what it is, with no page cap: a PDF or an image as its pages
-rendered to images, one page per image (no text extraction anywhere; the endpoint
-rejects PDFs sent natively); an office document (doc/docx/ppt/pptx/xls/xlsx/odt/odp/
-ods/rtf) converted to PDF by LibreOffice first; a video with its sound transcribed
-(in pieces of 10 minutes, one transcription call each) and 12 frames sampled evenly
-across the recording shown next to the transcript; an audio file as its transcript.
-A KO whose file cannot be fetched or read falls back to the export's text, and a file
-flow that fails retries once from the export's text; the basis of every summary is
-recorded per KO (`resummarised.from`, with the kind, pages, chunks, calls and
-findings) and counted on the Run sheet.
+**The file as it is.** The file is downloaded from the `@id` URL (cached locally; a
+PDF up to 100 MB, any other file up to 600 MB) and read as what it is, never cut
+short: a PDF of up to 100 pages or an image as its pages rendered to images, one page
+per image (the endpoint rejects PDFs sent natively); a PDF of more than 100 pages as
+its own text layer, every page in order, in chunks of at most 100,000 characters
+(figures, and tables drawn as images, are not seen; a text layer that is missing or
+unreadable - fewer than 50 words, or fewer than 80% of words containing a letter -
+sends the KO to the export's text); an office document (doc/docx/ppt/pptx/xls/xlsx/
+odt/odp/ods/rtf) converted to PDF by LibreOffice first, then as a PDF; a video with
+its sound transcribed (in pieces of 10 minutes, one transcription call each) and 12
+frames sampled evenly across the recording shown next to the transcript; an audio
+file as its transcript. A KO whose file cannot be fetched or read, or whose PDF is
+over 100 MB, falls back to the export's text, and a file flow that fails retries once
+from the export's text; the basis of every summary is recorded per KO
+(`resummarised.from`, with the kind - `pdf` for page images, `pdf_text` for a text
+layer - pages, chunks, calls, findings, and why the file was not used when it was
+not) and counted on the Run sheet.
 
 **How the summary is written.** A document of up to 12 pages (the provider's
 images-per-prompt limit), a transcript with frames, or a text is drafted in one call.
@@ -442,8 +448,10 @@ weights, pillar weights, readability cut-offs, models, the reference text's sour
 limits, coverage and coherence baselines, diversity anchor sample, BM25, specificity,
 the LLM pillar's model, the generation settings, the resummarise settings - the
 document's language, 12 pages per chunk, merges of 8, verification on, translation
-to English on, no page cap, 120 dpi, JPEG quality 80, 12 video frames, 10-minute
-audio segments, the transcription model, 600 MB and 300 s download limits - and the
+to English on, page images for PDFs of up to 100 pages and the text layer above,
+100,000 characters per text chunk, 120 dpi, JPEG quality 80, 12 video frames,
+10-minute audio segments, the transcription model, 100 MB for a PDF, 600 MB for any
+other file and a 300 s download limit - and the
 cross-lingual rule: at least 2 tokens, known-word Zipf 2.0, known share 0.5). Values learned from the corpus are computed from the export
 and cached with the index, keyed on the export file and the settings; switching
 `reference.source` rebuilds the index.
@@ -552,9 +560,9 @@ changes.
   confirm that the LLM's score drops.
 - **Factual correctness of the file itself is not assessed.** The score checks that the
   metadata agrees with the summary, not that the file's advice is right.
-- **Cost.** About 100 s per KO on CPU: 98-102 s in the October 2026 runs with the summary
-  as the reference and the LLM answers mostly cached, 134 s for two long PDFs that were
-  resummarised (Intel Core Ultra 9 185H laptop). Nearly all of it is the embedding and
-  entailment models. The full export of 11,627 KOs needs about 13 days of CPU time at this
-  rate, plus the wait for any LLM calls not already cached. The LLM pillar adds up to 8
-  calls per KO.
+- **Cost.** About 35 s per KO on CPU, one KO at a time: 32-34 s on an Intel Core Ultra 9
+  185H laptop (3 November 2026, input of 92 KOs; 94 s for the same KOs when the laptop
+  was throttled), nearly all in the embedding and entailment models. With `--resummarise`
+  the LLM stages added about 11 s per KO in a 30-KO run. The full export of 11,627 KOs
+  would take roughly 5-6 days at these rates; not yet measured on an input that large.
+  The LLM pillar adds up to 8 calls per KO.

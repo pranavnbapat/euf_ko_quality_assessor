@@ -48,7 +48,7 @@ def draw(path: Path) -> None:
              "GLM only if the classifier is unsure (P 0.20-0.70)"], LOCAL, 22, 56)
     resum = ("RESUMMARISE   optional (--resummarise)",
              ["the reference summary written fresh from the file itself, in the document's own",
-              "language: pages as images, office files converted first, a video's sound",
+              "language: pages as images (over 100 pages the PDF's text), office files converted, a video's sound",
               "transcribed and its frames shown; long files in parts, merged; every draft checked",
               "against its pages and revised; a non-English summary also translated to English",
               "for the search index. 2-4 calls per short document (qwen3.5 by default). Without",
@@ -203,8 +203,9 @@ def build(out: Path, image: Path) -> None:
          "Only for the few KOs the classifier is unsure about"),
         ("Resummarise (optional)", "With --resummarise, writes each KO's reference summary fresh "
                                    "from the file itself, in the document's own language. The file "
-                                   "is fetched from its @id URL and read as it is: pages as images, "
-                                   "office files converted first, a video's sound transcribed and "
+                                   "is fetched from its @id URL and read as it is: pages as images "
+                                   "(a PDF of more than 100 pages as its own text; a "
+                                   "PDF over 100 MB is not downloaded), office files converted first, a video's sound transcribed and "
                                    "its frames shown. Long files are summarised in parts and merged, "
                                    "every draft is checked against its pages and revised, and a "
                                    "non-English summary is also translated to English for the search "

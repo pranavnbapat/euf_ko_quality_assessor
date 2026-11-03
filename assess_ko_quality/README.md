@@ -43,13 +43,14 @@ python pipeline.py --limit 200 --no-llm-score --no-gate-llm --use-existing-llm
 The first run on an export builds a corpus index: about 20 minutes the very first time
 (it embeds every KO once), about 5 minutes after a settings change, seconds otherwise. It
 is cached in `output/_corpus_cache/`, and switching the reference text between the
-summary and the file rebuilds it. Assessment then takes about 100 seconds per KO on CPU:
-98-102 s in the October 2026 runs with the summary as the reference and the LLM answers
-mostly cached, and 134 s for two long PDFs whose summaries were rewritten, on an Intel
-Core Ultra 9 185H laptop. Nearly all of it is the two transformer models; in a profile of
-one KO the entailment model took about a third and the embedding model about half. At
-this rate the full export of 11,627 KOs needs about 13 days of CPU time, plus the wait for
-any LLM calls not already cached.
+summary and the file rebuilds it. Assessment then takes about 35 seconds per KO on CPU,
+one KO at a time: 32-34 s on an Intel Core Ultra 9 185H laptop on 3 November 2026, with
+the summary as the reference and an input of 92 KOs. The same five KOs took 94 s each on a
+day the laptop ran about three times slower, so the machine's power state matters. Nearly
+all of it is the two transformer models, the embedding model and the entailment model.
+With `--resummarise` the LLM stages (8 calls at a time) added about 11 s per KO in a 30-KO
+run. At these rates the full export of 11,627 KOs needs roughly 5-6 days; that has not
+been measured on an input that large, where every KO is ranked against more KOs.
 
 **LLM calls.** Only five things can call an LLM:
 - **The `*_llm` fields**: one call per KO with a summary, writing all four fields fresh
@@ -92,7 +93,7 @@ describes itself.
 | `--no-gate-llm` | off | Classifier-only gate; with `--no-llm-score` and `--use-existing-llm` too, no LLM calls at all |
 | `--use-existing-llm` | off | Score the export's `*_llm` fields as the LLM variant instead of writing them fresh from the summary (the pre-version-12 behaviour) |
 | `--no-llm-score` | off | Leave the LLM pillar out: the field scores average the three measured pillars |
-| `--resummarise` | off | Regenerate each assessed KO's reference summary with the current vision model from the file itself, **in the document's own language** (downloaded from `@id` and read as it is: pages as images, office files converted, a video's sound transcribed and its frames shown; long documents summarised in parts and merged; every draft verified against its pages and revised; a non-English summary also translated to English for the search index; export-text fallback, basis recorded per KO). That summary becomes the reference the fields are measured against; the summaries are stored in the outputs. Not comparable with runs on the export's summaries |
+| `--resummarise` | off | Regenerate each assessed KO's reference summary with the current vision model from the file itself, **in the document's own language** (downloaded from `@id` and read as it is: pages as images up to 100 pages, a longer PDF's own text layer above that, a PDF over 100 MB not downloaded, office files converted, a video's sound transcribed and its frames shown; long documents summarised in parts and merged; every draft verified against its pages and revised; a non-English summary also translated to English for the search index; export-text fallback, basis recorded per KO). That summary becomes the reference the fields are measured against; the summaries are stored in the outputs. Not comparable with runs on the export's summaries |
 | `--ids` | all | Comma list of `_orig_id` values to assess (debugging; the other filters still apply) |
 | `--no-summary-check` | off | Skip stage 3b, the compression/coverage/NLI reading on the reference summary |
 | `--generate-model` | spec (`''` = the client's default) | Model that writes the `*_llm` fields; name it in full as the provider lists it |

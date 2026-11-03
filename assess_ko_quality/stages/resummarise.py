@@ -11,10 +11,16 @@ fields written in English. Both texts, and the platform's own summary, go into t
 outputs.
 
 The file is read as it is, whatever it is:
-  pdf / image      the pages rendered to images (PyMuPDF, a visual rendering; the text
-                   layer is never read - a stored text can be a translation of the
-                   file, found on 6749f43db330af0ffc54189f), one page per image, no
-                   page cap;
+  pdf / image      the pages rendered to images (PyMuPDF), one page per image, for a
+                   PDF of up to `max_image_pages` pages (100). A longer PDF is read
+                   from its own text layer instead, in chunks of pages of at most
+                   `max_source_chars` characters, and summarised the same way; a text
+                   layer that fails the Gopher quality filter's word rules (a scan,
+                   glyph codes) sends the KO to the export's text. The export's stored
+                   text is not used while the file is readable: it can be a
+                   translation of the file (found on 6749f43db330af0ffc54189f). A PDF
+                   over `max_pdf_mb` (100 MB) is not downloaded; other files up to
+                   `max_file_mb` (600 MB);
   office           doc/docx/ppt/pptx/xls/xlsx/odt/odp/ods/rtf converted to PDF by
                    LibreOffice headless first, then as above;
   video            the sound transcribed (whisper-large-v3 through the provider's
@@ -318,36 +324,39 @@ def _declared_ext(rec: Dict[str, Any]) -> str:
     return ""
 
 
-def _download(url: str, timeout: int, max_bytes: int) -> Optional[bytes]:
+def _download(url: str, timeout: int, max_bytes: int) -> Tuple[Optional[bytes], str]:
     """
-    The file at `url`, or None when it cannot be fetched within the size cap. Cached
-    on disk by URL (.cache/files/, gitignored): a video of 150 MB is fetched once.
+    The file at `url` and "", or None and why not: "too_large" over the size cap, else
+    "download_failed". Cached on disk by URL (.cache/files/, gitignored): a video of
+    150 MB is fetched once.
     """
     import requests
 
     _FILE_CACHE.mkdir(parents=True, exist_ok=True)
     path = _FILE_CACHE / (hashlib.sha256(url.encode("utf-8")).hexdigest()[:24] + ".bin")
-    if path.exists() and path.stat().st_size <= max_bytes:
-        return path.read_bytes()
+    if path.exists():
+        if path.stat().st_size <= max_bytes:
+            return path.read_bytes(), ""
+        return None, "too_large"
     try:
         with requests.get(url, timeout=timeout, stream=True) as r:
             if r.status_code != 200:
-                return None
+                return None, "download_failed"
             if int(r.headers.get("Content-Length") or 0) > max_bytes:
-                return None
+                return None, "too_large"
             buf = io.BytesIO()
             for chunk in r.iter_content(chunk_size=1 << 20):
                 buf.write(chunk)
                 if buf.tell() > max_bytes:
-                    return None
+                    return None, "too_large"
             data = buf.getvalue()
     except Exception:
-        return None
+        return None, "download_failed"
     try:
         path.write_bytes(data)
     except OSError:
         pass
-    return data
+    return data, ""
 
 
 def _file_kind(rec: Dict[str, Any], data: bytes) -> str:
@@ -410,22 +419,51 @@ def _office_to_pdf(data: bytes, ext: str, timeout: int) -> Optional[bytes]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _render_pdf(data: bytes, dpi: int, max_pages: int, quality: int
-                ) -> Tuple[List[Dict[str, Any]], int]:
+def _render_pdf(doc: Any, dpi: int, quality: int) -> List[Dict[str, Any]]:
     """
-    Every page (or the first `max_pages` when capped) as a JPEG image part, encoded as
-    it is rendered so a long document never holds hundreds of bitmaps; the page count.
+    Every page as a JPEG image part, encoded as it is rendered so a long document never
+    holds many bitmaps at once.
     """
-    import pymupdf
     from PIL import Image
 
-    doc = pymupdf.open(stream=data, filetype="pdf")
-    pages = doc[:max_pages] if max_pages > 0 else doc
     parts = []
-    for p in pages:
+    for p in doc:
         img = Image.open(io.BytesIO(p.get_pixmap(dpi=dpi).tobytes("png"))).convert("RGB")
         parts.append(_image_part(img, quality))
-    return parts, doc.page_count
+    return parts
+
+
+def _pdf_text(doc: Any, max_chars: int) -> Tuple[Optional[List[Tuple[int, int, str]]], int]:
+    """
+    A PDF read from its own text layer instead of as page images: the pages in order,
+    grouped into chunks of at most `max_chars` characters, as (first page, last page,
+    text) with a marker before every page; and the number of pages with any text.
+    None when the text layer is unusable by the Gopher quality filter's rules (Rae et
+    al. 2021, Table A1): fewer than 50 words, or fewer than 80% of words containing a
+    letter. That catches a scan without a text layer and a layer of glyph codes.
+    """
+    from core.content_report import GOPHER_QUALITY
+
+    pages = [re.sub(r"[ \t]+", " ", p.get_text("text") or "").strip() for p in doc]
+    words = re.findall(r"\w+", " ".join(pages))
+    alpha = sum(1 for w in words if any(c.isalpha() for c in w))
+    if len(words) < GOPHER_QUALITY["min_words"] or \
+            alpha / len(words) < GOPHER_QUALITY["min_alpha_word_ratio"]:
+        return None, sum(1 for t in pages if t)
+    groups: List[Tuple[int, int, str]] = []
+    size = 0
+    for n, text in enumerate(pages, 1):
+        if not text:
+            continue
+        block = f"--- page {n} ---\n{text}"[:max_chars]
+        if groups and size + len(block) + 2 <= max_chars:
+            first, _, joined = groups[-1]
+            groups[-1] = (first, n, f"{joined}\n\n{block}")
+            size += len(block) + 2
+        else:
+            groups.append((n, n, block))
+            size = len(block)
+    return groups, sum(1 for t in pages if t)
 
 
 def _media(data: bytes, ext: str, cfg: Dict[str, Any], with_frames: bool
@@ -503,12 +541,14 @@ class Source:
     """One KO's file as chunks the model can read, plus how it was obtained."""
 
     def __init__(self, chunks: List[List[Dict[str, Any]]], scope: str, part_scope: str,
-                 pages: int, basis: Dict[str, Any]) -> None:
+                 pages: int, basis: Dict[str, Any],
+                 ranges: Optional[List[Tuple[int, int]]] = None) -> None:
         self.chunks = chunks          # each: content parts (images and/or text)
         self.scope = scope            # "the document" / "the transcript and frames" / ...
         self.part_scope = part_scope  # "these pages", when there are several chunks
         self.pages = pages
         self.basis = basis            # recorded per KO (_resummarised_from)
+        self.ranges = ranges          # (first, last) page of each chunk; None: one per image
 
 
 def acquire(rec: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[Optional[Source], str]:
@@ -520,11 +560,18 @@ def acquire(rec: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[Optional[Source],
     url = str(rec.get("@id") or "").strip()
     if not url.lower().startswith("http"):
         return None, "no_file_url"
-    data = _download(url, int(cfg.get("download_timeout", 300)),
-                     int(cfg.get("max_file_mb", 600)) << 20)
+    file_mb = int(cfg.get("max_file_mb", 600))
+    pdf_mb = int(cfg.get("max_pdf_mb", 0)) or file_mb
+    declared_pdf = _declared_ext(rec) == "pdf"
+    data, why = _download(url, int(cfg.get("download_timeout", 300)),
+                          (pdf_mb if declared_pdf else file_mb) << 20)
     if data is None:
-        return None, "download_failed"
+        if why == "too_large":
+            return None, f"pdf_over_{pdf_mb}_mb" if declared_pdf else f"file_over_{file_mb}_mb"
+        return None, why
     kind = _file_kind(rec, data)
+    if kind == "pdf" and len(data) > pdf_mb << 20:      # a PDF its metadata did not declare
+        return None, f"pdf_over_{pdf_mb}_mb"
     quality = int(cfg.get("render_jpeg_quality", 80))
     chunk_pages = int(cfg.get("chunk_pages") or cfg.get("max_images_per_call", 12))
     basis: Dict[str, Any] = {"from": "file", "kind": kind, "bytes": len(data)}
@@ -563,9 +610,35 @@ def acquire(rec: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[Optional[Source],
         total = 1
         basis["kind"] = "image"
     elif kind == "pdf":
+        import pymupdf
+
         try:
-            parts, total = _render_pdf(data, int(cfg.get("render_dpi", 120)),
-                                       int(cfg.get("max_pages", 0)), quality)
+            doc = pymupdf.open(stream=data, filetype="pdf")
+            total = doc.page_count
+        except Exception:
+            return None, "render_failed"
+        limit = int(cfg.get("max_image_pages", 0))
+        if limit and total > limit:
+            # Too long to send as page images: the PDF's own text, in chunks of pages.
+            try:
+                groups, with_text = _pdf_text(doc, int(cfg.get("max_source_chars", 100000)))
+            except Exception:
+                return None, "pdf_text_failed"
+            if not groups:
+                return None, f"pdf_over_{limit}_pages_text_unusable"
+            basis.update({"kind": f"{basis.get('kind', 'pdf')}_text", "pages_total": total,
+                          "pages_sent": 0, "pages_with_text": with_text,
+                          "text_chars": sum(len(t) for _, _, t in groups)})
+            if len(groups) == 1:
+                chunks = [[_text_part(f"=== THE DOCUMENT'S TEXT, EXTRACTED FROM ITS {total} "
+                                      f"PAGES ===\n{groups[0][2]}")]]
+            else:
+                chunks = [[_text_part(f"=== TEXT OF PAGES {a}-{b} OF {total}, EXTRACTED "
+                                      f"FROM THE PDF ===\n{text}")] for a, b, text in groups]
+            return Source(chunks, "the document", "these pages", total, basis,
+                          ranges=[(a, b) for a, b, _ in groups]), ""
+        try:
+            parts = _render_pdf(doc, int(cfg.get("render_dpi", 120)), quality)
         except Exception:
             return None, "render_failed"
         if not parts:
@@ -579,14 +652,20 @@ def acquire(rec: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[Optional[Source],
     return Source(chunks, "the document", "these pages", len(parts), basis), ""
 
 
-def text_source(rec: Dict[str, Any], max_chars: int, after: str = "") -> Optional[Source]:
-    """The export's text (the vision reading, then the extracted text) as the fallback."""
+def text_source(rec: Dict[str, Any], max_chars: int, after: str = "",
+                fallback: str = "") -> Optional[Source]:
+    """
+    The export's text (the vision reading, then the extracted text) as the fallback.
+    `after`: the file flow that failed first; `fallback`: why the file was not used.
+    """
     text = reference_text(rec, max_chars, "file")
     if len(text.split()) < 50:
         return None
     basis = {"from": "export_text", "kind": "text", "words": len(text.split())}
     if after:
         basis["after"] = after
+    if fallback:
+        basis["fallback"] = fallback
     return Source([[_text_part("=== FILE TEXT ===\n" + text)]], "the text", "the text", 0, basis)
 
 
@@ -666,8 +745,11 @@ def summarise(client, src: Source, cfg: Dict[str, Any]) -> Dict[str, Any]:
         notes: List[str] = []
         named: List[str] = []
         first = 1
-        for chunk in src.chunks:
-            last = first + len(chunk) - 1
+        for i, chunk in enumerate(src.chunks):
+            if src.ranges:
+                first, last = src.ranges[i]
+            else:
+                last = first + len(chunk) - 1
             raw = ask(chunk, notes_brief(first, last, src.pages))
             first = last + 1
             text = _clean(raw.get("notes"))
@@ -765,7 +847,7 @@ def generate(records: Sequence[Dict[str, Any]], spec: Dict[str, Any],
             rec = by_id[kid]
             if src is None:
                 fallback_reasons[why] = fallback_reasons.get(why, 0) + 1
-                src = text_source(rec, max_src)
+                src = text_source(rec, max_src, fallback=why)
             if src is None:
                 skipped += 1
                 continue

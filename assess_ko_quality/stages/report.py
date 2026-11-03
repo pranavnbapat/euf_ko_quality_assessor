@@ -253,7 +253,7 @@ def write(out_dir: Path, results: List[Dict[str, Any]], analysis_out: Dict[str, 
             continue
         rs = r.get("resummarised") or {}
         basis = (f"{rs.get('from')}:{rs.get('kind')}" + (f" after {rs['after']}" if rs.get("after") else "")
-                 if rs else None)
+                 + (f" ({rs['fallback']})" if rs.get("fallback") else "") if rs else None)
         unverified = (f"{rs['unverified']} of {rs['sentences']}" if "sentences" in rs else None)
         rows.append([r["_orig_id"], s.get("source"), s.get("language"), basis,
                      rs.get("pages_total"), rs.get("chunks"), rs.get("calls"),
